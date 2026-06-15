@@ -1,9 +1,66 @@
-import { createClient, PostgrestError } from '@supabase/supabase-js';
+import { createClient, PostgrestError, SupabaseClient } from '@supabase/supabase-js';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+const getEnvValue = (key: 'VITE_SUPABASE_URL' | 'VITE_SUPABASE_ANON_KEY'): string | undefined => {
+  if (typeof import.meta !== 'undefined' && typeof import.meta.env !== 'undefined') {
+    return import.meta.env[key] as string | undefined;
+  }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+  return process.env[key] as string | undefined;
+};
+
+const getSupabaseUrl = (): string => {
+  return getEnvValue('VITE_SUPABASE_URL') || process.env.SUPABASE_URL || '';
+};
+
+const getSupabaseAnonKey = (): string => {
+  return getEnvValue('VITE_SUPABASE_ANON_KEY') || process.env.SUPABASE_ANON_KEY || '';
+};
+
+let supabaseClient: SupabaseClient | null = null;
+
+const initializeSupabase = (): SupabaseClient => {
+  if (supabaseClient) {
+    return supabaseClient;
+  }
+
+  const supabaseUrl = getSupabaseUrl();
+  const supabaseAnonKey = getSupabaseAnonKey();
+
+  if (!supabaseUrl) {
+    throw new Error('Supabase initialization failed: VITE_SUPABASE_URL or SUPABASE_URL is required.');
+  }
+  if (!supabaseAnonKey) {
+    throw new Error('Supabase initialization failed: VITE_SUPABASE_ANON_KEY or SUPABASE_ANON_KEY is required.');
+  }
+
+  supabaseClient = createClient(supabaseUrl, supabaseAnonKey);
+  return supabaseClient;
+};
+
+export const supabase = new Proxy({} as SupabaseClient, {
+  get(target, prop) {
+    const client = initializeSupabase();
+    const value = (client as any)[prop];
+    return typeof value === 'function' ? value.bind(client) : value;
+  },
+  set(target, prop, value) {
+    const client = initializeSupabase();
+    (client as any)[prop] = value;
+    return true;
+  },
+  has(target, prop) {
+    const client = initializeSupabase();
+    return prop in client;
+  },
+  ownKeys(target) {
+    return Reflect.ownKeys(initializeSupabase());
+  },
+  getOwnPropertyDescriptor(target, prop) {
+    const descriptor = Object.getOwnPropertyDescriptor(initializeSupabase(), prop);
+    if (descriptor) descriptor.configurable = true;
+    return descriptor;
+  },
+});
 
 export interface Employee {
   id: string;
@@ -18,7 +75,17 @@ export interface Employee {
   password_hash: string;
   role?: 'user' | 'admin' | 'superadmin' | 'employee';
   productive_apps?: string[];
+  shift_start?: string;
+  shift_end?: string;
+  timesheet_exempt?: boolean;
   created_at: string;
+}
+
+export interface AppSettings {
+  id: string;
+  setting_key: string;
+  setting_value: string;
+  updated_at?: string;
 }
 
 export interface WorkSession {
@@ -35,6 +102,17 @@ export interface WorkSession {
   productive_seconds: number;
   day_finished?: boolean;
   ended_work_time?: string | null;
+  created_at: string;
+}
+
+export interface TimesheetLockLog {
+  id: string;
+  employee_id: string;
+  employee_name: string;
+  event_type: 'WARNING' | 'LOCKED' | 'MANUAL_LOCK' | 'MANUAL_UNLOCK' | 'AUTO_UNLOCK';
+  admin_id: string | null;
+  admin_name: string | null;
+  reason: string | null;
   created_at: string;
 }
 
@@ -114,15 +192,65 @@ export async function loginEmployee(
     }
 
     if (loginLog) {
-      // Create employee on the fly if doesn't exist
-      const createdEmployee: Employee = {
-        id: `emp-${loginLog.employee_code}`,
-        employee_code: loginLog.employee_code,
-        employee_name: loginLog.username,
+      // IMPORTANT: Do NOT use a synthetic "emp-XXXX" id here as it breaks screenshot
+      // mapping between the agent and the monitoring dashboard.
+      // Instead, look up the real employee record by employee_code, or upsert one so
+      // every part of the system uses the same real database UUID.
+
+      const empCode = (loginLog.employee_code || normalizedCode).toUpperCase();
+      const empName = loginLog.username || normalizedName || empCode;
+
+      // 1. First try to find existing employee by code (without password constraint,
+      //    since login_logs may store plain-text passwords while employees stores hashed).
+      const { data: existingEmp } = await supabase
+        .from('employees')
+        .select('*')
+        .eq('employee_code', empCode)
+        .maybeSingle() as { data: Employee | null; error: PostgrestError | null };
+
+      if (existingEmp) {
+        // Employee record already exists — return it with updated password_hash so
+        // subsequent direct logins work too.
+        console.log(`[Login] Found existing employee record for ${empCode} via login_logs fallback, id=${existingEmp.id}`);
+        return { employee: existingEmp, error: null };
+      }
+
+      // 2. No employee record yet — upsert one so we get a real UUID.
+      const newEmpPayload = {
+        employee_code: empCode,
+        employee_name: empName,
+        password_hash: password,
+        role: 'employee' as const,
+      };
+
+      const { data: upsertedEmp, error: upsertError } = await supabase
+        .from('employees')
+        .insert([newEmpPayload])
+        .select()
+        .maybeSingle() as { data: Employee | null; error: PostgrestError | null };
+
+      if (upsertedEmp) {
+        console.log(`[Login] Created employee record for ${empCode} via login_logs fallback, id=${upsertedEmp.id}`);
+        return { employee: upsertedEmp, error: null };
+      }
+
+      // 3. If upsert failed (e.g. RLS restriction), fall back to a stable deterministic
+      //    synthetic id so at least this session is consistent, but log a warning.
+      if (upsertError) {
+        console.warn(`[Login] Could not upsert employee record for ${empCode}:`, upsertError.message,
+          '— falling back to login_logs-based object. Screenshots may not be visible in monitoring.');
+      }
+
+      // Stable fallback: use login_logs row id if available, else code-based
+      const stableId = loginLog.id || `emp-${empCode}`;
+      const fallbackEmployee: Employee = {
+        id: stableId,
+        employee_code: empCode,
+        employee_name: empName,
         password_hash: password,
         created_at: new Date().toISOString(),
       };
-      return { employee: createdEmployee, error: null };
+      return { employee: fallbackEmployee, error: null };
     }
 
     return { employee: null, error: loginError };
@@ -133,42 +261,49 @@ export async function loginEmployee(
 }
 
 export async function getTodaySession(employeeId: string): Promise<WorkSession | null> {
-  const today = new Date().toISOString().slice(0, 10);
   try {
+    const d = new Date();
+    const today = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    
+    // Check if session exists for today
+    // Limit to the most recent matching session to avoid multiple-row errors
     const { data, error } = await supabase
       .from('work_sessions')
       .select('*')
       .eq('employee_id', employeeId)
       .eq('session_date', today)
-      .maybeSingle() as { data: WorkSession | null; error: PostgrestError | null };
+      .order('created_at', { ascending: false })
+      .limit(1) as { data: WorkSession[] | null; error: PostgrestError | null };
+
+    const sessionRow = Array.isArray(data) && data.length > 0 ? data[0] : null;
 
     if (error) {
       console.error('Error fetching today session:', error);
     }
 
-    if (data) {
+    if (sessionRow) {
       // If started_work_time is null, set it to created_at (original session creation time, not current time)
-      if (!data.started_work_time) {
-        const startTime = data.created_at; // Use session creation time, not now
-        console.log('[getTodaySession] Setting started_work_time for session', data.id, 'to', startTime, '(from created_at)');
+      if (!sessionRow.started_work_time) {
+        const startTime = sessionRow.created_at; // Use session creation time, not now
+        console.log('[getTodaySession] Setting started_work_time for session', sessionRow.id, 'to', startTime, '(from created_at)');
         const { data: updatedSession, error: updateError } = await supabase
           .from('work_sessions')
           .update({ started_work_time: startTime })
-          .eq('id', data.id)
+          .eq('id', sessionRow.id)
           .select()
           .maybeSingle() as { data: WorkSession | null; error: PostgrestError | null };
-        
+
         if (updateError) {
           console.error('Error updating started_work_time:', updateError);
           // Even if DB update fails, return with the updated time locally
           console.log('[getTodaySession] Returning with local started_work_time:', startTime);
-          return { ...data, started_work_time: startTime };
+          return { ...sessionRow, started_work_time: startTime };
         }
         console.log('[getTodaySession] DB update succeeded, returning updated session');
-        return updatedSession || { ...data, started_work_time: startTime };
+        return updatedSession || { ...sessionRow, started_work_time: startTime };
       }
-      console.log('[getTodaySession] Session already has started_work_time:', data.started_work_time);
-      return data;
+      console.log('[getTodaySession] Session already has started_work_time:', sessionRow.started_work_time);
+      return sessionRow;
     }
 
     // Create new session if doesn't exist
@@ -365,6 +500,25 @@ export async function fetchSessionsByDate(dateString: string): Promise<WorkSessi
   return data || [];
 }
 
+export async function fetchAllRecentSessions(): Promise<WorkSession[]> {
+  const { data, error } = await supabase
+    .from('work_sessions')
+    .select('*')
+    .order('session_date', { ascending: false })
+    .order('created_at', { ascending: false }) as {
+      data: WorkSession[] | null;
+      error: PostgrestError | null;
+    };
+
+  if (error) {
+    console.error('Error fetching all recent sessions:', error);
+    return [];
+  }
+
+  return data || [];
+}
+
+
 export async function fetchRecentActivityLogs(limit = 100) {
   const { data, error } = await supabase
     .from('activity_logs')
@@ -380,12 +534,19 @@ export async function fetchRecentActivityLogs(limit = 100) {
     return [];
   }
 
-  return data || [];
+  const logs = data || [];
+  return logs.map(log => {
+    if (log.activity_type === 'idle_reason' && !log.idle_reason) {
+      const match = log.window_title?.match(/\(Reason:\s*(.+)\)$/);
+      log.idle_reason = match ? match[1] : log.window_title;
+    }
+    return log;
+  });
 }
 
 export async function fetchActivityLogsByDate(dateString: string) {
-  const startOfDay = new Date(`${dateString}T00:00:00.000Z`).toISOString();
-  const endOfDay = new Date(`${dateString}T23:59:59.999Z`).toISOString();
+  const startOfDay = new Date(`${dateString}T00:00:00`).toISOString();
+  const endOfDay = new Date(`${dateString}T23:59:59.999`).toISOString();
 
   const { data, error } = await supabase
     .from('activity_logs')
@@ -402,7 +563,59 @@ export async function fetchActivityLogsByDate(dateString: string) {
     return [];
   }
 
-  return data || [];
+  const logs = data || [];
+  return logs.map(log => {
+    if (log.activity_type === 'idle_reason' && !log.idle_reason) {
+      const match = log.window_title?.match(/\(Reason:\s*(.+)\)$/);
+      log.idle_reason = match ? match[1] : log.window_title;
+    }
+    return log;
+  });
+}
+
+export async function fetchEmployeeSessionByDate(employeeId: string, dateString: string): Promise<WorkSession | null> {
+  const { data, error } = await supabase
+    .from('work_sessions')
+    .select('*')
+    .eq('employee_id', employeeId)
+    .eq('session_date', dateString)
+    .maybeSingle() as { data: WorkSession | null; error: PostgrestError | null };
+
+  if (error) {
+    console.error('Error fetching employee session by date:', error);
+    return null;
+  }
+  return data;
+}
+
+export async function fetchEmployeeActivityLogsByDate(employeeId: string, dateString: string) {
+  const startOfDay = new Date(`${dateString}T00:00:00`).toISOString();
+  const endOfDay = new Date(`${dateString}T23:59:59.999`).toISOString();
+
+  const { data, error } = await supabase
+    .from('activity_logs')
+    .select('*')
+    .eq('employee_id', employeeId)
+    .gte('logged_at', startOfDay)
+    .lte('logged_at', endOfDay)
+    .order('logged_at', { ascending: false }) as {
+      data: ActivityLog[] | null;
+      error: PostgrestError | null;
+    };
+
+  if (error) {
+    console.error('Error fetching employee activity logs by date:', error);
+    return [];
+  }
+
+  const logs = data || [];
+  return logs.map(log => {
+    if (log.activity_type === 'idle_reason' && !log.idle_reason) {
+      const match = log.window_title?.match(/\(Reason:\s*(.+)\)$/);
+      log.idle_reason = match ? match[1] : log.window_title;
+    }
+    return log;
+  });
 }
 
 export async function fetchEmployeeActivity(employeeId: string, limit = 100) {
@@ -449,12 +662,12 @@ export async function createActivityLog(entry: {
   window_title: string;
   activity_type: string;
   idle_reason?: string | null;
+  duration_seconds?: number;
   logged_at: string;
   cpu_usage?: number;
   memory_usage?: number;
-  duration_seconds?: number;
-  productive?: boolean;
   website?: string;
+  productive?: boolean;
 }) {
   const payload = {
     session_id: entry.session_id,
@@ -474,11 +687,50 @@ export async function createActivityLog(entry: {
     data: ActivityLog[] | null;
     error: PostgrestError | null;
   };
+
   if (error) {
     console.error('Error writing activity log:', error);
     return null;
   }
   return data;
+}
+
+export interface IdleAlert {
+  id?: string;
+  employee_id: string;
+  session_id: string;
+  idle_since: string;
+  response: string;
+  reason: string;
+  description: string;
+  created_at?: string;
+}
+
+export async function createIdleAlert(entry: IdleAlert): Promise<boolean> {
+  const { error } = await supabase.from('idle_alerts').insert([entry]);
+  if (error) {
+    console.error('Error creating idle alert:', error);
+    return false;
+  }
+  return true;
+}
+
+export async function fetchIdleAlertsByDate(employeeId: string, dateStr: string): Promise<IdleAlert[]> {
+  const nextDateStr = new Date(new Date(dateStr).getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+  const { data, error } = await supabase
+    .from('idle_alerts')
+    .select('*')
+    .eq('employee_id', employeeId)
+    .gte('created_at', `${dateStr}T00:00:00.000Z`)
+    .lt('created_at', `${nextDateStr}T00:00:00.000Z`)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('Error fetching idle alerts:', error);
+    return [];
+  }
+  return data || [];
 }
 
 export interface Screenshot {
@@ -508,7 +760,7 @@ export async function createScreenshot(entry: {
     url: entry.url || `${entry.app_name}-${entry.captured_at || new Date().toISOString()}`,
   };
 
-  const { data, error } = await supabase.from('screenshots').insert([payload]) as {
+  const { data, error } = await supabase.from('screenshots').insert([payload]).select() as {
     data: Screenshot[] | null;
     error: PostgrestError | null;
   };
@@ -520,6 +772,7 @@ export async function createScreenshot(entry: {
 }
 
 export async function getEmployeeScreenshots(employeeId: string, limit = 10): Promise<Screenshot[]> {
+  // Primary query: by real UUID
   const { data, error } = await supabase
     .from('screenshots')
     .select('*')
@@ -534,13 +787,46 @@ export async function getEmployeeScreenshots(employeeId: string, limit = 10): Pr
     console.error('Error fetching screenshots:', error);
     return [];
   }
-  return data || [];
+
+  const primary = data || [];
+
+  // Backward-compatibility: also fetch screenshots stored under the legacy
+  // synthetic "emp-XXXX" ID (created before the employee-ID mapping fix).
+  // Look up the employee_code to build the legacy ID.
+  if (primary.length === 0) {
+    try {
+      const { data: empRow } = await supabase
+        .from('employees')
+        .select('employee_code')
+        .eq('id', employeeId)
+        .maybeSingle() as { data: { employee_code: string } | null; error: PostgrestError | null };
+
+      if (empRow?.employee_code) {
+        const legacyId = `emp-${empRow.employee_code.toUpperCase()}`;
+        const { data: legacyData } = await supabase
+          .from('screenshots')
+          .select('*')
+          .eq('employee_id', legacyId)
+          .order('captured_at', { ascending: false })
+          .limit(limit) as { data: Screenshot[] | null; error: PostgrestError | null };
+        if (legacyData && legacyData.length > 0) {
+          console.log(`[Screenshots] Found ${legacyData.length} screenshots under legacy id ${legacyId}`);
+          return legacyData;
+        }
+      }
+    } catch (legacyErr) {
+      console.warn('[Screenshots] Legacy ID fallback lookup failed:', legacyErr);
+    }
+  }
+
+  return primary;
 }
 
 export async function getEmployeeScreenshotsByDate(employeeId: string, dateString: string): Promise<Screenshot[]> {
-  const startOfDay = new Date(`${dateString}T00:00:00.000Z`).toISOString();
-  const endOfDay = new Date(`${dateString}T23:59:59.999Z`).toISOString();
+  const startOfDay = new Date(`${dateString}T00:00:00`).toISOString();
+  const endOfDay = new Date(`${dateString}T23:59:59.999`).toISOString();
 
+  // Primary query: by real UUID
   const { data, error } = await supabase
     .from('screenshots')
     .select('*')
@@ -556,7 +842,59 @@ export async function getEmployeeScreenshotsByDate(employeeId: string, dateStrin
     console.error('Error fetching screenshots by date:', error);
     return [];
   }
-  return data || [];
+
+  const primary = data || [];
+
+  // Backward-compatibility: also fetch screenshots stored under the legacy
+  // synthetic "emp-XXXX" ID (created before the employee-ID mapping fix).
+  if (primary.length === 0) {
+    try {
+      const { data: empRow } = await supabase
+        .from('employees')
+        .select('employee_code')
+        .eq('id', employeeId)
+        .maybeSingle() as { data: { employee_code: string } | null; error: PostgrestError | null };
+
+      if (empRow?.employee_code) {
+        const legacyId = `emp-${empRow.employee_code.toUpperCase()}`;
+        const { data: legacyData } = await supabase
+          .from('screenshots')
+          .select('*')
+          .eq('employee_id', legacyId)
+          .gte('captured_at', startOfDay)
+          .lte('captured_at', endOfDay)
+          .order('captured_at', { ascending: false }) as { data: Screenshot[] | null; error: PostgrestError | null };
+        if (legacyData && legacyData.length > 0) {
+          console.log(`[Screenshots] Found ${legacyData.length} screenshots under legacy id ${legacyId} for date ${dateString}`);
+          return legacyData;
+        }
+      }
+    } catch (legacyErr) {
+      console.warn('[Screenshots] Legacy ID fallback lookup failed:', legacyErr);
+    }
+  }
+
+  return primary;
+}
+
+export async function getTimesheetLockLogsByDate(employeeId: string, dateString: string): Promise<TimesheetLockLog[]> {
+  const startOfDay = new Date(`${dateString}T00:00:00`).toISOString();
+  const endOfDay = new Date(`${dateString}T23:59:59.999`).toISOString();
+
+  const { data, error } = await supabase
+    .from('timesheet_locks')
+    .select('*')
+    .eq('employee_id', employeeId)
+    .gte('created_at', startOfDay)
+    .lte('created_at', endOfDay)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('Error fetching timesheet lock logs by date:', error);
+    return [];
+  }
+
+  return data as TimesheetLockLog[];
 }
 
 export interface MonitoringSettings {
@@ -722,3 +1060,68 @@ export async function updateEmployeeProductiveApps(employeeId: string, appsList:
   }
   return data;
 }
+
+export async function fetchAppSettings(): Promise<Record<string, string>> {
+  const { data, error } = await supabase.from('app_settings').select('*');
+  if (error) {
+    console.error('Error fetching app settings:', error);
+    return {};
+  }
+  const settings: Record<string, string> = {};
+  if (data) {
+    data.forEach((row: AppSettings) => {
+      settings[row.setting_key] = row.setting_value;
+    });
+  }
+  return settings;
+}
+
+export async function updateAppSetting(key: string, value: string): Promise<boolean> {
+  const { error } = await supabase
+    .from('app_settings')
+    .upsert({ setting_key: key, setting_value: value }, { onConflict: 'setting_key' });
+  if (error) {
+    console.error('Error updating app setting:', error);
+    return false;
+  }
+  return true;
+}
+
+export async function logTimesheetLockEvent(
+  employeeId: string, 
+  employeeName: string, 
+  eventType: 'WARNING' | 'LOCKED' | 'MANUAL_LOCK' | 'MANUAL_UNLOCK' | 'AUTO_UNLOCK',
+  adminId?: string,
+  adminName?: string,
+  reason?: string
+): Promise<boolean> {
+  const { error } = await supabase.from('timesheet_lock_logs').insert([{
+    employee_id: employeeId,
+    employee_name: employeeName,
+    event_type: eventType,
+    admin_id: adminId || null,
+    admin_name: adminName || null,
+    reason: reason || null
+  }]);
+  if (error) {
+    console.error('Error logging timesheet event:', error);
+    return false;
+  }
+  return true;
+}
+
+export async function fetchRecentTimesheetLockLogs(limit: number = 200): Promise<TimesheetLockLog[]> {
+  const { data, error } = await supabase
+    .from('timesheet_lock_logs')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(limit) as { data: TimesheetLockLog[] | null; error: any };
+
+  if (error) {
+    console.error('Error fetching timesheet lock logs:', error);
+    return [];
+  }
+
+  return data || [];
+}
+

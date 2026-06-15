@@ -3,8 +3,11 @@
     "target": "ES2020",
     "module": "ES2020",
     "lib": ["ES2020", "DOM"],
-    "outDir": "./dist/electron",
-    "rootDir": "./electron",
+    "outDir": "./dist",
+    "baseUrl": ".",
+    "paths": {
+      "@lib/*": ["src/lib/*"]
+    },
     "strict": false,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -16,6 +19,6 @@
     "sourceMap": true,
     "types": ["electron", "node"]
   },
-  "include": ["electron/**/*.ts"],
+  "include": ["electron/**/*.ts", "src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

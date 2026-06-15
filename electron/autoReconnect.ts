@@ -4,7 +4,7 @@ import { mainWindow } from './main.js';
 let isOnline = true;
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 
-const CHECK_URL = 'https://qdqypcwnrbdgqagfdeun.supabase.co';
+const CHECK_URL = 'https://ogqmojvzeyasqoqhkpuz.supabase.co';
 
 export function setupAutoReconnect() {
   // Start a simple periodic connectivity check from the main process.

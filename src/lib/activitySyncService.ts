@@ -167,8 +167,6 @@ class ActivitySyncService {
           website: log.website,
           productive: log.productive,
           duration_seconds: log.durationSeconds,
-          cpu_usage: log.cpuUsage,
-          memory_usage: log.memoryUsage,
         })),
         screenshots: localScreenshots.map(s => ({
           app_name: s.app_name,

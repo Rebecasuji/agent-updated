@@ -158,19 +158,12 @@ async function sendDailySummaryEmails() {
 
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Get yesterday's date in local timezone
+    // Get today's date in local timezone
     const today = new Date();
     const year = today.getFullYear();
     const month = String(today.getMonth() + 1).padStart(2, '0');
     const day = String(today.getDate()).padStart(2, '0');
     const todayString = `${year}-${month}-${day}`;
-
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayYear = yesterday.getFullYear();
-    const yesterdayMonth = String(yesterday.getMonth() + 1).padStart(2, '0');
-    const yesterdayDay = String(yesterday.getDate()).padStart(2, '0');
-    const yesterdayString = `${yesterdayYear}-${yesterdayMonth}-${yesterdayDay}`;
 
     // Fetch all employees with valid emails
     const { data: employees, error: employeesError } = await supabase
@@ -196,7 +189,7 @@ async function sendDailySummaryEmails() {
 
     for (const employee of employees) {
       try {
-        const metrics = await fetchEmployeeMetrics(supabase, employee.id, yesterdayString);
+        const metrics = await fetchEmployeeMetrics(supabase, employee.id, todayString);
 
         if (!metrics) {
           console.warn(`[Scheduler] Could not fetch metrics for employee ${employee.id}`);
@@ -208,7 +201,7 @@ async function sendDailySummaryEmails() {
 
         // Only send if there's meaningful data
         if (metrics.totalTime > 0 || metrics.topApps.length > 0) {
-          const success = await sendSummaryEmail(employee.email, employeeName, yesterdayString, {
+          const success = await sendSummaryEmail(employee.email, employeeName, todayString, {
             totalTime: formatSecondsToDuration(metrics.totalTime),
             deskTime: formatSecondsToDuration(metrics.deskTime),
             idleTime: formatSecondsToDuration(metrics.idleTime),
@@ -246,10 +239,15 @@ async function sendDailySummaryEmails() {
 
 /**
  * Initialize and start the daily scheduler
- * Schedule: Daily at 6:00 AM (configurable via SUMMARY_EMAIL_TIME env var)
- * Format: "0 6 * * *" (minute hour day-of-month month day-of-week)
+ * Schedule: Daily at 11:59 PM (configurable via SUMMARY_EMAIL_TIME env var)
+ * Format: "59 23 * * *" (minute hour day-of-month month day-of-week)
  */
 export function startDailyScheduler() {
+  if (schedulerTask) {
+    console.log('[Scheduler] Daily scheduler is already running');
+    return;
+  }
+
   try {
     // Initialize email service first
     const emailInitialized = initializeEmailService();
@@ -257,8 +255,8 @@ export function startDailyScheduler() {
       console.warn('[Scheduler] Email service not properly initialized, scheduler will not send emails');
     }
 
-    // Get scheduled time from environment or use default (6:00 AM)
-    const scheduleTime = process.env.SUMMARY_EMAIL_TIME || '0 6 * * *';
+    // Get scheduled time from environment or use default (11:59 PM)
+    const scheduleTime = process.env.SUMMARY_EMAIL_TIME || '59 23 * * *';
 
     console.log(`[Scheduler] Starting daily scheduler with cron expression: ${scheduleTime}`);
 

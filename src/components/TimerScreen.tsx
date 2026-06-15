@@ -2,12 +2,16 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Monitor, Clock, Zap, Coffee, Activity, LogOut, Droplets, Timer,
   Globe, Code2, FileSpreadsheet, Mail, MessageSquare, Terminal,
-  LayoutDashboard, Layers, ChevronDown, ChevronUp, Moon, XCircle, Play, PauseCircle,
+  LayoutDashboard, Layers, ChevronDown, ChevronUp, Moon, XCircle, Play, PauseCircle, Calendar,
 } from 'lucide-react';
-import { Employee, WorkSession, finishDay } from '../lib/supabase';
+import { Employee, WorkSession, finishDay, fetchEmployeeSessionByDate, fetchEmployeeActivityLogsByDate, getEmployeeScreenshotsByDate, fetchIdleAlertsByDate } from '../lib/supabase';
 import { useActivityMonitor, formatTime, ActivityState } from '../hooks/useActivityMonitor';
 import WaterReminderModal from './WaterReminderModal';
 import WindowControls from './WindowControls';
+import DatePicker from 'react-datepicker';
+import 'react-datepicker/dist/react-datepicker.css';
+import { format } from 'date-fns';
+import PMSNotificationModal from './PMSNotificationModal';
 
 interface TimerScreenProps {
   employee: Employee;
@@ -101,12 +105,12 @@ export default function TimerScreen({ employee, session, showWaterReminder, onDi
   const logPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [showConfirmLogout, setShowConfirmLogout] = useState(false);
   const [showConfirmFinishDay, setShowConfirmFinishDay] = useState(false);
-  
+
   // Debug log for session data
   useEffect(() => {
     console.log('[TimerScreen] Received session:', session.id, 'started_work_time:', session.started_work_time);
   }, [session.id]);
-  
+
   // Load monitoring settings on mount
   useEffect(() => {
     const loadSettings = async () => {
@@ -120,24 +124,59 @@ export default function TimerScreen({ employee, session, showWaterReminder, onDi
   }, []);
   const [activityLogs, setActivityLogs] = useState<ActivityLogEntry[]>([]);
   const [logsExpanded, setLogsExpanded] = useState(true);
+  const [activeLogTab, setActiveLogTab] = useState<'activity' | 'apps' | 'alerts'>('activity');
   const [recentScreenshots, setRecentScreenshots] = useState<any[]>([]);
+  const [idleAlerts, setIdleAlerts] = useState<any[]>([]);
 
   const [clockStr, setClockStr] = useState('');
   const [dateStr, setDateStr] = useState('');
   const [debugInfo, setDebugInfo] = useState({ logsCount: 0, activityState: 'away', lastUpdate: new Date().toLocaleTimeString() });
+
+  // Historical View State
+  const [selectedDate, setSelectedDate] = useState<Date>(new Date());
+  const [isHistoricalView, setIsHistoricalView] = useState(false);
+  const [historicalSession, setHistoricalSession] = useState<WorkSession | null>(null);
+  const [historicalActivityLogs, setHistoricalActivityLogs] = useState<ActivityLogEntry[]>([]);
+  const [historicalLastActive, setHistoricalLastActive] = useState<string | null>(null);
+
+  // PMS Notifications State
+  const [pmsData, setPmsData] = useState<{ tasks: number; discussions: number } | null>(null);
+
+  // Start background PMS poller and listen for notifications from main process
+  useEffect(() => {
+    const api = (window as any).electronAPI;
+    if (!api?.startPMSPoller) return;
+
+    // Start the background poller in the Electron main process
+    api.startPMSPoller(employee.employee_code);
+
+    // Listen for PMS notification events pushed from main process
+    if (api.onPmsNotification) {
+      api.onPmsNotification((data: { newTasks: number; newDiscussions: number }) => {
+        if (data.newTasks > 0 || data.newDiscussions > 0) {
+          setPmsData({ tasks: data.newTasks, discussions: data.newDiscussions });
+        }
+      });
+    }
+
+    return () => {
+      // Stop poller when component unmounts (logout)
+      if (api.stopPMSPoller) api.stopPMSPoller();
+    };
+  }, [employee.employee_code]);
 
   // Handle finish day
   const handleFinishDay = async () => {
     try {
       // Call finishDay to update database
       await finishDay(session.id);
-      
+
       // Stop monitoring via Electron IPC
       const api = (window as any).electronAPI;
       if (api?.invoke) {
         await api.invoke('finish-day');
       }
-      
+
       // Logout user after finishing day
       onLogout();
     } catch (err) {
@@ -158,26 +197,77 @@ export default function TimerScreen({ employee, session, showWaterReminder, onDi
     return () => clearInterval(id);
   }, []);
 
-  // Poll screenshots from Supabase
+  // Poll or Fetch screenshots
   useEffect(() => {
     const fetchScreenshots = async () => {
       try {
+        if (isHistoricalView) {
+          const dateString = format(selectedDate, 'yyyy-MM-dd');
+          const [data, alertsData] = await Promise.all([
+            getEmployeeScreenshotsByDate(employee.id, dateString),
+            fetchIdleAlertsByDate(employee.id, dateString)
+          ]);
+          setRecentScreenshots(Array.isArray(data) ? data : []);
+          setIdleAlerts(Array.isArray(alertsData) ? alertsData : []);
+          return;
+        }
+
+        const todayStr = format(new Date(), 'yyyy-MM-dd');
         const { getEmployeeScreenshots } = await import('../lib/supabase');
-        const data = await getEmployeeScreenshots(employee.id, 12);
+        const [data, alertsData] = await Promise.all([
+          getEmployeeScreenshots(employee.id, 12),
+          fetchIdleAlertsByDate(employee.id, todayStr)
+        ]);
         if (Array.isArray(data)) {
           setRecentScreenshots(data);
+        }
+        if (Array.isArray(alertsData)) {
+          setIdleAlerts(alertsData);
         }
       } catch (err) {
         console.error('Error fetching recent screenshots:', err);
       }
     };
     fetchScreenshots();
-    const id = setInterval(fetchScreenshots, 30000);
-    return () => clearInterval(id);
-  }, [employee.id]);
+    if (!isHistoricalView) {
+      const id = setInterval(fetchScreenshots, 30000);
+      return () => clearInterval(id);
+    }
+  }, [employee.id, isHistoricalView, selectedDate]);
 
-  // Poll activity logs from Electron every 3 seconds
+  // Poll or Fetch activity logs
   useEffect(() => {
+    if (isHistoricalView) {
+      const fetchHistoricalLogs = async () => {
+        const dateString = format(selectedDate, 'yyyy-MM-dd');
+        try {
+          const logs = await fetchEmployeeActivityLogsByDate(employee.id, dateString);
+
+          let lastActiveTime = null;
+          if (logs.length > 0) {
+            lastActiveTime = new Date(logs[0].logged_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          }
+
+          setHistoricalLastActive(lastActiveTime);
+
+          const formattedLogs: ActivityLogEntry[] = logs.map((log: any) => ({
+            appName: log.app_name || 'Unknown',
+            windowTitle: log.window_title || 'No title',
+            website: log.website || '',
+            type: log.activity_type as 'app' | 'idle' | 'away',
+            productive: log.productive || false,
+            startTime: log.logged_at,
+            durationSeconds: log.duration_seconds || 0
+          }));
+          setHistoricalActivityLogs(formattedLogs);
+        } catch (err) {
+          console.error('[Timer] Error fetching historical activity logs:', err);
+        }
+      };
+      fetchHistoricalLogs();
+      return;
+    }
+
     const poll = async () => {
       const api = (window as any).electronAPI;
       if (!api?.getActivityLogs) {
@@ -201,7 +291,25 @@ export default function TimerScreen({ employee, session, showWaterReminder, onDi
     poll();
     logPollRef.current = setInterval(poll, 2000);
     return () => { if (logPollRef.current) clearInterval(logPollRef.current); };
-  }, []);
+  }, [isHistoricalView, selectedDate, employee.id]);
+
+  // Fetch historical session when selected date changes
+  useEffect(() => {
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const selectedStr = format(selectedDate, 'yyyy-MM-dd');
+
+    if (selectedStr === todayStr) {
+      setIsHistoricalView(false);
+      setHistoricalSession(null);
+    } else {
+      setIsHistoricalView(true);
+      const loadSession = async () => {
+        const pastSession = await fetchEmployeeSessionByDate(employee.id, selectedStr);
+        setHistoricalSession(pastSession);
+      };
+      loadSession();
+    }
+  }, [selectedDate, employee.id]);
 
   // Update debug info with current activity state
   useEffect(() => {
@@ -213,16 +321,28 @@ export default function TimerScreen({ employee, session, showWaterReminder, onDi
 
   // Note: Sync to DB is handled globally in the background by activitySyncService.
   // Idle detection is now handled by the separate idlePromptWindow in main process.
-  
-  const stateConf = STATE_CONFIG[activity.state];
+
+  // Derived variables for display
+  const displaySession = isHistoricalView ? historicalSession : session;
+  const displayLogs = isHistoricalView ? historicalActivityLogs : activityLogs;
+
+  const displaySessionSeconds = isHistoricalView
+    ? (historicalSession?.active_seconds || 0) + (historicalSession?.idle_seconds || 0)
+    : activity.sessionSeconds;
+  const displayActiveSeconds = isHistoricalView ? (historicalSession?.active_seconds || 0) : activity.activeSeconds;
+  const displayIdleSeconds = isHistoricalView ? (historicalSession?.idle_seconds || 0) : activity.idleSeconds;
+  const displayProductiveSeconds = isHistoricalView ? (historicalSession?.productive_seconds || 0) : activity.productiveSeconds;
+  const displayAwaySeconds = isHistoricalView ? 0 : activity.awaySeconds;
+
+  const stateConf = isHistoricalView ? STATE_CONFIG['neutral'] : STATE_CONFIG[activity.state];
+
   const productivityPct =
-    activity.sessionSeconds > 0
-      ? Math.round((activity.productiveSeconds / activity.sessionSeconds) * 100)
+    displaySessionSeconds > 0
+      ? Math.round((displayProductiveSeconds / displaySessionSeconds) * 100)
       : 0;
 
-  // Use started_work_time (first login) rather than punch_in_time (punch confirmation)
-  const punchInTime = session.started_work_time
-    ? new Date(session.started_work_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const punchInTime = displaySession?.started_work_time
+    ? new Date(displaySession.started_work_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : 'Not recorded';
 
   return (
@@ -240,25 +360,39 @@ export default function TimerScreen({ employee, session, showWaterReminder, onDi
           </div>
         </div>
         <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 border border-pink-100 rounded-lg px-3 py-1.5 hover:border-pink-300 transition-colors bg-pink-50/30">
+            <Calendar className="w-4 h-4 text-pink-500" />
+            <DatePicker
+              selected={selectedDate}
+              onChange={(date: Date | null) => date && setSelectedDate(date)}
+              maxDate={new Date()}
+              dateFormat="MMM d, yyyy"
+              className="bg-transparent border-none outline-none text-sm font-semibold text-gray-700 w-28 cursor-pointer"
+            />
+          </div>
           <div className="text-right hidden sm:block">
             <p className="font-semibold text-gray-700 text-sm">{clockStr}</p>
             <p className="text-xs text-gray-400">{dateStr}</p>
           </div>
           <WindowControls />
-          <button
-            onClick={() => setShowConfirmFinishDay(true)}
-            className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-amber-500 transition border border-transparent hover:border-amber-200 rounded-lg px-3 py-1.5"
-          >
-            <PauseCircle className="w-4 h-4" />
-            <span className="hidden sm:inline">Pause</span>
-          </button>
-          <button
-            onClick={() => setShowConfirmLogout(true)}
-            className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-rose-500 transition border border-transparent hover:border-rose-200 rounded-lg px-3 py-1.5"
-          >
-            <LogOut className="w-4 h-4" />
-            <span className="hidden sm:inline">Sign Out</span>
-          </button>
+          {!isHistoricalView && (
+            <>
+              <button
+                onClick={() => setShowConfirmFinishDay(true)}
+                className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-amber-500 transition border border-transparent hover:border-amber-200 rounded-lg px-3 py-1.5"
+              >
+                <PauseCircle className="w-4 h-4" />
+                <span className="hidden sm:inline">Pause</span>
+              </button>
+              <button
+                onClick={() => setShowConfirmLogout(true)}
+                className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-rose-500 transition border border-transparent hover:border-rose-200 rounded-lg px-3 py-1.5"
+              >
+                <LogOut className="w-4 h-4" />
+                <span className="hidden sm:inline">Sign Out</span>
+              </button>
+            </>
+          )}
         </div>
       </header>
 
@@ -273,23 +407,23 @@ export default function TimerScreen({ employee, session, showWaterReminder, onDi
             <div className="text-center">
               <p className="text-xs uppercase tracking-widest text-gray-400 mb-2 font-semibold">Session Duration</p>
               <div className="font-mono text-6xl font-bold text-gray-800 tracking-tight">
-                {formatTime(activity.sessionSeconds)}
+                {formatTime(displaySessionSeconds)}
               </div>
               {/* State badge with pulsing dot */}
               <div className={`inline-flex items-center gap-2 mt-3 px-4 py-1.5 rounded-full border text-sm font-semibold ${stateConf.bg} ${stateConf.color}`}>
-                <span className={`w-2 h-2 rounded-full ${stateConf.dot} animate-pulse`} />
+                {!isHistoricalView && <span className={`w-2 h-2 rounded-full ${stateConf.dot} animate-pulse`} />}
                 {stateConf.icon}
-                {stateConf.label}
+                {isHistoricalView ? 'Historical Record' : stateConf.label}
               </div>
             </div>
 
             {/* Time breakdown */}
             <div className="grid grid-cols-5 gap-3">
-              <TimeCard label="Active" seconds={activity.activeSeconds} color="green" icon={<Zap className="w-5 h-5 text-emerald-500" />} />
-              <TimeCard label="Idle" seconds={activity.idleSeconds} color="amber" icon={<Coffee className="w-5 h-5 text-amber-500" />} />
-              <TimeCard label="Productive" seconds={activity.productiveSeconds} color="pink" icon={<Activity className="w-5 h-5 text-pink-500" />} />
-              <TimeCard label="Non-Productive" seconds={Math.max(0, activity.activeSeconds - activity.productiveSeconds)} color="rose" icon={<XCircle className="w-5 h-5 text-rose-500" />} />
-              <TimeCard label="Away" seconds={activity.awaySeconds} color="slate" icon={<Moon className="w-5 h-5 text-slate-400" />} />
+              <TimeCard label="Active" seconds={displayActiveSeconds} color="green" icon={<Zap className="w-5 h-5 text-emerald-500" />} />
+              <TimeCard label="Idle" seconds={displayIdleSeconds} color="amber" icon={<Coffee className="w-5 h-5 text-amber-500" />} />
+              <TimeCard label="Productive" seconds={displayProductiveSeconds} color="pink" icon={<Activity className="w-5 h-5 text-pink-500" />} />
+              <TimeCard label="Non-Productive" seconds={Math.max(0, displayActiveSeconds - displayProductiveSeconds)} color="rose" icon={<XCircle className="w-5 h-5 text-rose-500" />} />
+              <TimeCard label="Away" seconds={displayAwaySeconds} color="slate" icon={<Moon className="w-5 h-5 text-slate-400" />} />
             </div>
 
             {/* Productivity bar */}
@@ -311,67 +445,135 @@ export default function TimerScreen({ employee, session, showWaterReminder, onDi
             </div>
           </div>
 
-          {/* ── Live Activity Log ─────────────────────────────── */}
-          <div className="bg-white rounded-2xl shadow-sm border border-pink-100 overflow-hidden">
-            <div
-              className="flex items-center justify-between px-5 py-3 border-b border-pink-50 cursor-pointer select-none"
-              onClick={() => setLogsExpanded(v => !v)}
-            >
-              <div className="flex items-center gap-2">
-                <Activity className="w-4 h-4 text-pink-400" />
-                <span className="text-xs uppercase tracking-widest text-gray-500 font-semibold">Live Activity Log</span>
-                <span className="text-xs bg-pink-100 text-pink-600 font-bold rounded-full px-2 py-0.5">{activityLogs.length}</span>
+          {/* ── Activity Log / App Usage / Idle Alerts ──────────────── */}
+          <div className="bg-white rounded-2xl shadow-sm border border-pink-100 overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between px-2 pt-2 border-b border-pink-50 bg-pink-50/20">
+              <div className="flex space-x-1">
+                {(['activity', 'apps', 'alerts'] as const).map(tab => (
+                  <button
+                    key={tab}
+                    onClick={() => { setActiveLogTab(tab); setLogsExpanded(true); }}
+                    className={`px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors ${activeLogTab === tab && logsExpanded
+                        ? 'bg-white text-pink-600 border-t border-x border-pink-100'
+                        : 'text-gray-500 hover:bg-white/50 border-t border-x border-transparent'
+                      }`}
+                  >
+                    {tab === 'activity' && (isHistoricalView ? 'Activity Log' : 'Live Activity')}
+                    {tab === 'apps' && 'App Usage'}
+                    {tab === 'alerts' && 'Idle Alerts'}
+                  </button>
+                ))}
               </div>
-              {logsExpanded
-                ? <ChevronUp className="w-4 h-4 text-gray-400" />
-                : <ChevronDown className="w-4 h-4 text-gray-400" />}
+              <button
+                className="p-2 mr-2 text-gray-400 hover:text-gray-600 transition"
+                onClick={() => setLogsExpanded(v => !v)}
+              >
+                {logsExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </button>
             </div>
 
             {logsExpanded && (
-              <div className="max-h-64 overflow-y-auto divide-y divide-gray-50">
-                {activityLogs.length === 0 ? (
-                  <div className="text-xs text-gray-400 text-center py-6">
-                    <p>No activity recorded yet…</p>
-                    <p className="mt-2 text-gray-300">
-                      {activity.currentApp && activity.currentApp !== 'Unknown'
-                        ? `Current active app: ${activity.currentApp}`
-                        : 'Monitoring for application changes'}
-                    </p>
-                    <p className="mt-1 text-gray-300">({debugInfo.logsCount} detected, state: {debugInfo.activityState})</p>
-                  </div>
-                ) : (
-                  activityLogs.map((log, i) => (
-                    <div key={i} className="flex items-center gap-3 px-5 py-2.5 hover:bg-pink-50/40 transition">
-                      {/* App icon */}
-                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${log.productive ? 'bg-emerald-50' : log.type === 'idle' ? 'bg-amber-50' : 'bg-rose-50'
-                        }`}>
-                        <AppIcon appName={log.appName} size="w-4 h-4" />
-                      </div>
+              <div className="max-h-64 overflow-y-auto divide-y divide-gray-50 p-2">
 
-                      {/* App name + title */}
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-semibold text-gray-700 truncate">{log.appName || '—'}</p>
-                        <p className="text-xs text-gray-400 truncate">
-                          {log.website || log.windowTitle || '—'}
-                        </p>
-                      </div>
-
-                      {/* Time + duration */}
-                      <div className="text-right shrink-0">
-                        <p className="text-xs text-gray-500">{formatLogTime(log.startTime)}</p>
-                        <p className={`text-xs font-semibold ${log.productive ? 'text-emerald-500' : log.type === 'idle' ? 'text-amber-500' : 'text-rose-400'}`}>
-                          {log.durationSeconds > 0 ? formatDuration(log.durationSeconds) : '…'}
-                        </p>
-                      </div>
-
-                      {/* Productive dot */}
-                      <span className={`w-2 h-2 rounded-full shrink-0 ${log.type === 'idle' ? 'bg-amber-400'
-                        : log.type === 'away' ? 'bg-slate-300'
-                          : log.productive ? 'bg-emerald-400' : 'bg-rose-400'
-                        }`} />
+                {/* Live Activity Log */}
+                {activeLogTab === 'activity' && (
+                  displayLogs.length === 0 ? (
+                    <div className="text-xs text-gray-400 text-center py-6">
+                      <p>No activity recorded yet…</p>
+                      {!isHistoricalView && (
+                        <>
+                          <p className="mt-2 text-gray-300">
+                            {activity.currentApp && activity.currentApp !== 'Unknown'
+                              ? `Current active app: ${activity.currentApp}`
+                              : 'Monitoring for application changes'}
+                          </p>
+                          <p className="mt-1 text-gray-300">({debugInfo.logsCount} detected, state: {debugInfo.activityState})</p>
+                        </>
+                      )}
                     </div>
-                  ))
+                  ) : (
+                    displayLogs.filter(log => log.type !== 'idle_reason').map((log, i) => (
+                      <div key={i} className="flex items-center gap-3 px-3 py-2.5 hover:bg-pink-50/40 transition rounded-lg">
+                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${log.productive ? 'bg-emerald-50' : log.type === 'idle' ? 'bg-amber-50' : 'bg-rose-50'}`}>
+                          <AppIcon appName={log.appName} size="w-4 h-4" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-gray-700 truncate">{log.appName || '—'}</p>
+                          <p className="text-xs text-gray-400 truncate">{log.website || log.windowTitle || '—'}</p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="text-xs text-gray-500">{formatLogTime(log.startTime)}</p>
+                          <p className={`text-xs font-semibold ${log.productive ? 'text-emerald-500' : log.type === 'idle' ? 'text-amber-500' : 'text-rose-400'}`}>
+                            {log.durationSeconds > 0 ? formatDuration(log.durationSeconds) : '…'}
+                          </p>
+                        </div>
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${log.type === 'idle' ? 'bg-amber-400' : log.type === 'away' ? 'bg-slate-300' : log.productive ? 'bg-emerald-400' : 'bg-rose-400'}`} />
+                      </div>
+                    ))
+                  )
                 )}
+
+                {/* App Usage */}
+                {activeLogTab === 'apps' && (
+                  (() => {
+                    const appUsage = new Map<string, number>();
+                    displayLogs.forEach((log) => {
+                      if (log.type === 'idle_reason') return;
+                      const appName = log.appName && log.appName !== 'Unknown' ? log.appName : 'Unknown';
+                      const duration = log.durationSeconds || 0;
+                      appUsage.set(appName, (appUsage.get(appName) || 0) + duration);
+                    });
+                    const sortedApps = Array.from(appUsage.entries()).sort((a, b) => b[1] - a[1]);
+
+                    return sortedApps.length === 0 ? (
+                      <div className="text-xs text-gray-400 text-center py-6">No app usage recorded yet.</div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-3 p-2">
+                        {sortedApps.map(([appName, durationSeconds]) => (
+                          <div key={appName} className="bg-slate-50 border border-slate-100 rounded-xl p-3 flex flex-col gap-1">
+                            <p className="text-xs font-semibold text-slate-800 truncate">{appName}</p>
+                            <p className="text-[10px] text-pink-600 font-bold tracking-wide">
+                              {formatDuration(durationSeconds)}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()
+                )}
+
+                {/* Idle Alerts */}
+                {activeLogTab === 'alerts' && (
+                  (() => {
+                    return idleAlerts.length === 0 ? (
+                      <div className="text-xs text-gray-400 text-center py-6">No idle alerts recorded.</div>
+                    ) : (
+                      <div className="divide-y divide-gray-50">
+                        {idleAlerts.map((alert, i) => {
+                          const durationStr = alert.duration_seconds ? formatDuration(alert.duration_seconds) : '';
+                          return (
+                            <div key={i} className="flex gap-3 py-2.5 px-3 bg-amber-50/40 rounded-lg mb-1">
+                              <div className="w-1.5 h-1.5 rounded-full bg-amber-400 mt-2 flex-shrink-0" />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-semibold text-amber-800 break-words">{alert.reason}</p>
+                                <p className="text-[10px] font-medium text-amber-700/80 mt-0.5">Status: {alert.response}</p>
+                                {durationStr ? (
+                                  <div className="mt-1 flex items-center gap-3 text-[10px] text-amber-700/80">
+                                    <span><span className="font-semibold text-amber-700">Time:</span> {formatLogTime(alert.idle_since)}</span>
+                                    <span><span className="font-semibold text-amber-700">Duration:</span> {durationStr}</span>
+                                  </div>
+                                ) : (
+                                  <p className="text-[10px] text-gray-400 mt-0.5">{formatLogTime(alert.idle_since)}</p>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()
+                )}
+
               </div>
             )}
           </div>
@@ -380,39 +582,44 @@ export default function TimerScreen({ employee, session, showWaterReminder, onDi
         {/* Right column */}
         <div className="flex flex-col gap-4">
 
-          {/* Current Activity */}
-          <div className="bg-white rounded-2xl shadow-sm border border-pink-100 p-5">
-            <p className="text-xs uppercase tracking-widest text-gray-400 mb-3 font-semibold">Current Activity</p>
-            <div className="flex items-start gap-3">
-              <div className="w-10 h-10 bg-pink-50 rounded-xl flex items-center justify-center shrink-0">
-                <AppIcon appName={activity.currentApp} size="w-5 h-5" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="font-bold text-gray-800 text-sm truncate">
-                  {activity.currentApp && activity.currentApp !== 'Unknown' ? activity.currentApp : '—'}
-                </p>
-                <p className="text-xs text-gray-400 truncate mt-0.5">
-                  {activity.website || activity.windowTitle || '—'}
-                </p>
-                {/* Live state pill */}
-                <div className={`inline-flex items-center gap-1 mt-2 text-xs font-semibold px-2 py-0.5 rounded-full border ${stateConf.bg} ${stateConf.color}`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${stateConf.dot} animate-pulse`} />
-                  {stateConf.label}
+          {/* Current Activity (Live Only) */}
+          {!isHistoricalView && (
+            <div className="bg-white rounded-2xl shadow-sm border border-pink-100 p-5">
+              <p className="text-xs uppercase tracking-widest text-gray-400 mb-3 font-semibold">Current Activity</p>
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 bg-pink-50 rounded-xl flex items-center justify-center shrink-0">
+                  <AppIcon appName={activity.currentApp} size="w-5 h-5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="font-bold text-gray-800 text-sm truncate">
+                    {activity.currentApp && activity.currentApp !== 'Unknown' ? activity.currentApp : '—'}
+                  </p>
+                  <p className="text-xs text-gray-400 truncate mt-0.5">
+                    {activity.website || activity.windowTitle || '—'}
+                  </p>
+                  {/* Live state pill */}
+                  <div className={`inline-flex items-center gap-1 mt-2 text-xs font-semibold px-2 py-0.5 rounded-full border ${stateConf.bg} ${stateConf.color}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${stateConf.dot} animate-pulse`} />
+                    {stateConf.label}
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
+          )}
 
           {/* Session Stats */}
           <div className="bg-white rounded-2xl shadow-sm border border-pink-100 p-5">
             <p className="text-xs uppercase tracking-widest text-gray-400 mb-3 font-semibold">Session Stats</p>
             <div className="space-y-3">
               <StatRow label="Started Working" value={punchInTime} />
-              <StatRow label="Total Session" value={formatTime(activity.sessionSeconds)} />
-              <StatRow label="Active Time" value={formatTime(activity.activeSeconds)} />
-              <StatRow label="Idle Time" value={formatTime(activity.idleSeconds)} />
-              <StatRow label="Non-Productive" value={formatTime(Math.max(0, activity.activeSeconds - activity.productiveSeconds))} />
-              <StatRow label="Away Time" value={formatTime(activity.awaySeconds)} />
+              {isHistoricalView && historicalLastActive && (
+                <StatRow label="Last Active" value={historicalLastActive} highlight />
+              )}
+              <StatRow label="Total Session" value={formatTime(displaySessionSeconds)} />
+              <StatRow label="Active Time" value={formatTime(displayActiveSeconds)} />
+              <StatRow label="Idle Time" value={formatTime(displayIdleSeconds)} />
+              <StatRow label="Non-Productive" value={formatTime(Math.max(0, displayActiveSeconds - displayProductiveSeconds))} />
+              <StatRow label="Away Time" value={formatTime(displayAwaySeconds)} />
               <StatRow label="Productive" value={`${productivityPct}%`} highlight />
             </div>
           </div>
@@ -468,6 +675,20 @@ export default function TimerScreen({ employee, session, showWaterReminder, onDi
 
       {/* ── Modals ─────────────────────────────────────────────── */}
       {showWaterReminder && <WaterReminderModal onDismiss={onDismissWater} />}
+
+      {pmsData && (
+        <PMSNotificationModal
+          tasks={pmsData.tasks}
+          discussions={pmsData.discussions}
+          onDismiss={() => {
+            setPmsData(null);
+            const api = (window as any).electronAPI;
+            if (api?.dismissPMSNotification) {
+              api.dismissPMSNotification();
+            }
+          }}
+        />
+      )}
 
       {showConfirmLogout && (
         <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50 p-4">

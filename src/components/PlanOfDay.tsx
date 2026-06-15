@@ -29,8 +29,7 @@ export default function PlanOfDay({
   const [loading, setLoading] = useState(false);
   const [portalOpened, setPortalOpened] = useState(false);
   const [punchError, setPunchError] = useState('');
-
-  const portalUrl = 'http://147.93.28.144:5003/plan-for-day';
+  const [portalUrl, setPortalUrl] = useState('https://timestrap.space/plan-for-day');
 
   useEffect(() => {
     if (portalOpened) return;
@@ -48,6 +47,17 @@ export default function PlanOfDay({
   const handleConfirmationYes = async () => {
     setSummaryError('');
     setLoading(true);
+    
+    // Get debug environment info from main process
+    try {
+      if (typeof window !== 'undefined' && (window as any).electronAPI?.debugEnv) {
+        const envDebug = await (window as any).electronAPI.debugEnv();
+        console.log('[PlanOfDay] Debug environment info from main process:');
+        console.log(JSON.stringify(envDebug, null, 2));
+      }
+    } catch (err) {
+      console.error('[PlanOfDay] Failed to get debug environment info:', err);
+    }
 
     try {
       const todaySession = await getTodaySession(employee.id);
@@ -71,23 +81,74 @@ export default function PlanOfDay({
         console.error('[PlanOfDay] Failed to check remote timesheet DB', e);
       }
 
-      if (externallySubmitted && todaySession) {
-        // Sync the plan submission to local database
-        try {
-          await markPlanAsSubmitted(todaySession.id);
-          console.log('✓ Synced plan submission to local database');
-        } catch (syncError) {
-          console.error('[PlanOfDay] Failed to sync plan submission:', syncError);
-          // Continue anyway - external verification is sufficient
+      if (externallySubmitted) {
+        // If external DB shows the plan we should proceed even if local session is missing.
+        if (todaySession) {
+          try {
+            await markPlanAsSubmitted(todaySession.id);
+            console.log('✓ Synced plan submission to local database');
+          } catch (syncError) {
+            console.error('[PlanOfDay] Failed to sync plan submission:', syncError);
+            // Continue anyway - external verification is sufficient
+          }
+        } else {
+          console.log('[PlanOfDay] External plan found but no local session exists - proceeding to punch');
         }
-        
+
         onSummarySubmitted?.();
         console.log('✓ Plan submission verified via remote DB');
         setPhase('punch');
         return;
       }
 
-      setSummaryError('The plan was not found as submitted in the database. Please submit the plan in the portal first and then try again.');
+      // If not found, request debug diagnostics from the main process and show details
+      try {
+        console.log('[PlanOfDay] About to check timesheet DB debug for employee:', employee.employee_code);
+        
+        // Get fresh environment debug right before checking timesheet DB
+        if (typeof window !== 'undefined' && (window as any).electronAPI?.debugEnv) {
+          const envDebugBefore = await (window as any).electronAPI.debugEnv();
+          console.log('[PlanOfDay] Environment state BEFORE timesheet check:', JSON.stringify(envDebugBefore, null, 2));
+        }
+        
+        if (typeof window !== 'undefined' && (window as any).electronAPI?.checkTimesheetDbDebug) {
+          const dbg = await (window as any).electronAPI.checkTimesheetDbDebug(employee.employee_code);
+          console.log('[PlanOfDay] checkTimesheetDbDebug result:', dbg);
+          console.log('[PlanOfDay] Debug details:', JSON.stringify(dbg.details, null, 2));
+          console.log('[PlanOfDay] Debug errors:', dbg.errors);
+          console.log('[PlanOfDay] Debug ok:', dbg.ok);
+
+          // Check for configuration errors first
+          if (!dbg.timesheetDbUrl) {
+            console.error('[PlanOfDay] CONFIGURATION ERROR: timesheetDbUrl not set in debug result', dbg);
+            setSummaryError('⚙️ Configuration Error: TIMESHEET_DB_URL is not configured in the application. Please contact your administrator.');
+            setLoading(false);
+            return;
+          }
+
+          // Check for database connection errors
+          if (!dbg.configStatus?.connectionSuccess && dbg.configStatus?.connectionAttempted) {
+            setSummaryError('🔌 Database Error: Could not connect to the timesheet database. Please check your internet connection and try again.');
+            setLoading(false);
+            return;
+          }
+
+          // Check for employee lookup errors
+          if (!dbg.details?.employeeId) {
+            setSummaryError('👤 Employee Not Found: Your employee code (' + employee.employee_code + ') was not found in the timesheet system. Please contact your administrator.');
+            setLoading(false);
+            return;
+          }
+
+          // If we got here, there's data but no submitted timesheet
+          setSummaryError('📋 Timesheet Not Submitted: Please submit your timesheet in the portal first, then click "Continue" again.');
+        } else {
+          setSummaryError('📋 Timesheet Not Submitted: Please submit your plan in the portal first, then try again.');
+        }
+      } catch (e) {
+        console.error('[PlanOfDay] Debug check failed:', e);
+        setSummaryError('❌ Unable to verify plan submission. Please try again.');
+      }
     } catch (error) {
       console.error('Error verifying plan submission:', error);
       setSummaryError('Unable to verify plan submission right now. Please try again.');
@@ -159,7 +220,7 @@ export default function PlanOfDay({
               </div>
             </div>
           </div>
-          <WindowControls disabledMinimize={windowLocked} disabledClose={windowLocked} />
+          <WindowControls disabledClose={windowLocked} />
         </header>
         <div className="flex-1 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl shadow-xl border border-pink-100 p-8 max-w-xl w-full">
@@ -188,12 +249,6 @@ export default function PlanOfDay({
           </div>
         </div>
 
-        {/* Locked mode indicator during summary phase */}
-        {windowLocked && (
-          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 text-xs text-gray-500 bg-red-50 px-4 py-2 rounded-lg border border-red-200 max-w-sm text-center">
-            🔒 <strong>Focused Mode Active:</strong> Other applications are locked. Verify your plan to proceed.
-          </div>
-        )}
       </div>
     );
   }
@@ -220,7 +275,7 @@ export default function PlanOfDay({
               </div>
             </div>
           </div>
-          <WindowControls disabledMinimize={windowLocked} disabledClose={windowLocked} />
+          <WindowControls disabledClose={windowLocked} />
         </header>
         <div className="flex-1 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl shadow-xl border border-pink-100 p-8 max-w-sm w-full text-center">
@@ -266,7 +321,7 @@ export default function PlanOfDay({
               </div>
             </div>
           </div>
-          <WindowControls disabledMinimize={windowLocked} disabledClose={windowLocked} />
+          <WindowControls disabledClose={windowLocked} />
         </header>
         <div className="flex-1 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl shadow-xl border border-pink-100 p-8 max-w-sm w-full text-center">
@@ -308,14 +363,16 @@ export default function PlanOfDay({
             </div>
           </div>
         </div>
-        <WindowControls disabledMinimize={windowLocked} disabledClose={windowLocked} />
+        <WindowControls disabledClose={windowLocked} />
       </header>
 
       <div className="flex-1 flex flex-col gap-6 p-6">
         <div className="flex-1 bg-white rounded-2xl shadow-md border border-pink-100 overflow-hidden">
           <div className="bg-gradient-to-r from-pink-50 to-rose-50 border-b border-pink-100 px-4 py-3 flex items-center gap-2">
             <ExternalLink className="w-4 h-4 text-pink-400" />
-            <span className="text-sm font-medium text-gray-600">Daily Plan Portal</span>
+            <span className="text-sm font-medium text-gray-600">
+              {portalUrl === 'https://timestrap.space/plan-for-day' ? 'Daily Plan Portal' : 'PMS Tasks'}
+            </span>
             <a
               href={portalUrl}
               target="_blank"
@@ -345,23 +402,27 @@ export default function PlanOfDay({
             >
               Continue
             </button>
-            <button
-              type="button"
-              onClick={handleBackClick}
-              className="w-full border border-pink-200 text-pink-600 font-semibold py-3 rounded-xl hover:bg-pink-50 transition"
-            >
-              Back
-            </button>
+            {portalUrl === 'https://timestrap.space/plan-for-day' ? (
+              <button
+                type="button"
+                onClick={() => setPortalUrl('http://147.93.28.144:5002/tasks')}
+                className="w-full border border-pink-200 text-pink-600 font-semibold py-3 rounded-xl hover:bg-pink-50 transition"
+              >
+                PMS - Upload New Task
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setPortalUrl('https://timestrap.space/plan-for-day')}
+                className="w-full border border-pink-200 text-pink-600 font-semibold py-3 rounded-xl hover:bg-pink-50 transition"
+              >
+                Back to TimeStrap
+              </button>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Locked mode indicator during form and summary phases */}
-      {windowLocked && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 text-xs text-gray-500 bg-red-50 px-4 py-2 rounded-lg border border-red-200 max-w-sm text-center">
-          🔒 <strong>Focused Mode Active:</strong> Other applications are locked. Complete your plan submission to proceed.
-        </div>
-      )}
     </div>
   );
 }

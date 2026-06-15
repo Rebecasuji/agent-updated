@@ -56,8 +56,12 @@ export function startScreenshotService() {
   screenshotInterval = setInterval(async () => {
     try {
       const activity = getCurrentActivity();
-      if (activity.isIdle || activity.state === 'away') {
-        debugLog('[Screenshot] System is idle/away, skipping screenshot');
+      // Only skip when the system is genuinely hardware-idle (no keyboard/mouse input).
+      // Do NOT skip for 'away' state — that just means active-win failed to detect
+      // the foreground window, which happens on many Windows configs. We still want
+      // to capture the screen so monitoring data is complete.
+      if (activity.isIdle) {
+        debugLog('[Screenshot] System is idle, skipping screenshot');
         return;
       }
 
@@ -116,7 +120,8 @@ export function startScreenshotService() {
   setTimeout(async () => {
     try {
       const activity = getCurrentActivity();
-      if (activity.isIdle || activity.state === 'away') return;
+      // Same rule: only skip on genuine hardware idle, not on 'away' state.
+      if (activity.isIdle) return;
 
       const now = new Date();
       const filename = `screenshot_init_${now.getTime()}.jpg`;

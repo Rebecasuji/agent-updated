@@ -6,6 +6,8 @@ import MotivationScreen from './components/MotivationScreen';
 import TimerScreen from './components/TimerScreen';
 import AdminMonitoringScreen from './components/AdminMonitoringScreen';
 import IdlePromptScreen from './components/IdlePromptScreen';
+import TimesheetReminderModal from './components/TimesheetReminderModal';
+import TimesheetLockScreen from './components/TimesheetLockScreen';
 import { activitySyncService } from './lib/activitySyncService';
 
 type AppScreen = 'login' | 'plan' | 'motivation' | 'timer' | 'admin' | 'idle-prompt';
@@ -22,6 +24,8 @@ export default function App() {
   const [planSubmitted, setPlanSubmitted] = useState(false);
   const [summarySubmitted, setSummarySubmitted] = useState(false);
   const [punchConfirmed, setPunchConfirmed] = useState(false);
+  const [timesheetReminderDate, setTimesheetReminderDate] = useState<string | null>(null);
+  const [timesheetLockedDate, setTimesheetLockedDate] = useState<string | null>(null);
   const waterTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const api = () => (window as any).electronAPI;
@@ -113,23 +117,33 @@ export default function App() {
           
           if (!window.location.hash.startsWith('#/idle-prompt')) {
             setScreen('timer');
+            
+            activitySyncService.setEmployeeId(cached.employee.id);
+            activitySyncService.startSyncingData(30000);
+            
+            if (cached.employee.employee_code) {
+              eApi.startTimesheetPoller?.(cached.employee.employee_code);
+            }
+            
+            // Restore counters in Electron activity monitor only if they aren't already running
+            const currentActivity = await eApi.getLatestActivity?.();
+            if (!currentActivity || currentActivity.sessionSeconds === 0) {
+              const elapsedSecs1 = latestSession.started_work_time
+                ? Math.floor((Date.now() - new Date(latestSession.started_work_time).getTime()) / 1000)
+                : 0;
+              await eApi.initializeSessionCounters?.(
+                latestSession.active_seconds || 0,
+                latestSession.idle_seconds || 0,
+                latestSession.productive_seconds || 0,
+                Math.max(elapsedSecs1, (latestSession.active_seconds || 0) + (latestSession.idle_seconds || 0))
+              );
+              console.log('[App] Initialized Electron session counters from Supabase data');
+            } else {
+              console.log('[App] Electron session counters already running, skipping initialization');
+            }
+            eApi.showFloatingTimer?.();
+            eApi.startTracking?.();
           }
-          
-          activitySyncService.setEmployeeId(cached.employee.id);
-          activitySyncService.startSyncingData(30000);
-          
-          // Restore counters in Electron activity monitor
-          const elapsedSecs1 = latestSession.started_work_time
-            ? Math.floor((Date.now() - new Date(latestSession.started_work_time).getTime()) / 1000)
-            : 0;
-          await eApi.initializeSessionCounters?.(
-            latestSession.active_seconds || 0,
-            latestSession.idle_seconds || 0,
-            latestSession.productive_seconds || 0,
-            Math.max(elapsedSecs1, (latestSession.active_seconds || 0) + (latestSession.idle_seconds || 0))
-          );
-          eApi.showFloatingTimer?.();
-          eApi.startTracking?.();
         } else if (cached) {
            eApi.clearSessionCache?.();
         }
@@ -185,26 +199,37 @@ export default function App() {
         setSummarySubmitted(true);
         setPunchConfirmed(true);
         
-        // ONLY set screen to timer if we are NOT in the idle-prompt window
+        // ONLY set screen to timer and start syncing if we are NOT in the idle-prompt window
         if (!window.location.hash.startsWith('#/idle-prompt')) {
           setScreen('timer');
+          
+          activitySyncService.setEmployeeId(cached.employee.id);
+          activitySyncService.startSyncingData(30000);
+
+          if (cached.employee.employee_code) {
+            console.log('[App] Restoring and starting timesheet poller for', cached.employee.employee_code);
+            eApi.startTimesheetPoller?.(cached.employee.employee_code);
+          }
+          
+          // Restore counters in Electron activity monitor only if they aren't already running
+          const currentActivity = await eApi.getLatestActivity?.();
+          if (!currentActivity || currentActivity.sessionSeconds === 0) {
+            const elapsedSecs2 = latestSession.started_work_time
+              ? Math.floor((Date.now() - new Date(latestSession.started_work_time).getTime()) / 1000)
+              : 0;
+            await eApi.initializeSessionCounters?.(
+              latestSession.active_seconds || 0,
+              latestSession.idle_seconds || 0,
+              latestSession.productive_seconds || 0,
+              Math.max(elapsedSecs2, (latestSession.active_seconds || 0) + (latestSession.idle_seconds || 0))
+            );
+            console.log('[App] Initialized Electron session counters from Supabase data');
+          } else {
+            console.log('[App] Electron session counters already running, skipping initialization');
+          }
+          eApi.showFloatingTimer?.();
+          eApi.startTracking?.();
         }
-        
-        activitySyncService.setEmployeeId(cached.employee.id);
-        activitySyncService.startSyncingData(30000);
-        
-        // Restore counters in Electron activity monitor
-        const elapsedSecs2 = latestSession.started_work_time
-          ? Math.floor((Date.now() - new Date(latestSession.started_work_time).getTime()) / 1000)
-          : 0;
-        await eApi.initializeSessionCounters?.(
-          latestSession.active_seconds || 0,
-          latestSession.idle_seconds || 0,
-          latestSession.productive_seconds || 0,
-          Math.max(elapsedSecs2, (latestSession.active_seconds || 0) + (latestSession.idle_seconds || 0))
-        );
-        eApi.showFloatingTimer?.();
-        eApi.startTracking?.();
       } else if (cached) {
          eApi.clearSessionCache?.();
       }
@@ -218,8 +243,8 @@ export default function App() {
       const eApi = api();
       if (!eApi) return;
 
-      // Lock for: login, plan, motivation (until plan flow complete), and admin
-      const shouldLock = screen === 'login' || screen === 'plan' || (screen === 'motivation' && !planFlowCompleted) || screen === 'admin';
+      // Lock for: login, plan, motivation (until plan flow complete), admin, and active timesheet enforcement
+      const shouldLock = screen === 'login' || screen === 'plan' || (screen === 'motivation' && !planFlowCompleted) || screen === 'admin' || !!timesheetLockedDate;
 
       if (shouldLock) {
         setWindowLocked(true);
@@ -248,7 +273,22 @@ export default function App() {
       }
     };
     syncWindowLock();
-  }, [screen, planFlowCompleted, planSubmitted, summarySubmitted, punchConfirmed]);
+  }, [screen, planFlowCompleted, planSubmitted, summarySubmitted, punchConfirmed, timesheetLockedDate]);
+
+  useEffect(() => {
+    const maybeLockSystem = async () => {
+      if (!timesheetLockedDate) return;
+      const eApi = api();
+      if (!eApi?.lockSystem) return;
+      try {
+        await eApi.lockSystem();
+        console.log('[App] Requested native system lock for timesheet enforcement');
+      } catch (err) {
+        console.error('[App] Native system lock request failed:', err);
+      }
+    };
+    maybeLockSystem();
+  }, [timesheetLockedDate]);
 
   // ── Water reminder ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -264,16 +304,46 @@ export default function App() {
     };
   }, [employee, screen, planFlowCompleted]);
 
+  // ── Listen for Timesheet Reminders ─────────────────────────────────────────
+  useEffect(() => {
+    const eApi = api();
+    if (eApi && eApi.onTimesheetReminder) {
+      eApi.onTimesheetReminder((data: { date: string }) => {
+        console.log('[App] Received timesheet reminder', data);
+        if (data && data.date) {
+          setTimesheetReminderDate(data.date);
+        }
+      });
+    }
+    if (eApi && eApi.onTimesheetLock) {
+      eApi.onTimesheetLock((data: { date: string }) => {
+        console.log('[App] Received timesheet lock event', data);
+        if (data && data.date) {
+          setTimesheetLockedDate(data.date);
+          // Auto-enter kiosk via state effect (but already handled by electron enforcer sending lock? Wait, electron sends the signal. Let's make sure window is locked in React state)
+          setWindowLocked(true);
+        }
+      });
+    }
+    if (eApi && eApi.onTimesheetUnlock) {
+      eApi.onTimesheetUnlock(() => {
+        console.log('[App] Received timesheet unlock event');
+        setTimesheetLockedDate(null);
+      });
+    }
+  }, []);
+
   // ── Handlers ───────────────────────────────────────────────────────────────
   const handleLogin = async (emp: Employee, sessionData: WorkSession) => {
     setEmployee(emp);
     setSession(sessionData);
-    activitySyncService.setEmployeeId(emp.id);
 
     if (emp.role === 'admin' || emp.role === 'superadmin') {
       setScreen('admin');
       return;
     }
+    
+    activitySyncService.setEmployeeId(emp.id);
 
     setPlanSubmitted(false);
     setSummarySubmitted(false);
@@ -330,6 +400,10 @@ export default function App() {
       // Show the floating live timer
       eApi.showFloatingTimer?.();
       await eApi.startTracking?.();
+      if (employee.employee_code) {
+        console.log('[App] Starting timesheet poller for', employee.employee_code);
+        eApi.startTimesheetPoller?.(employee.employee_code);
+      }
     }
 
     setScreen('motivation');
@@ -387,6 +461,16 @@ export default function App() {
     return <MotivationScreen employee={employee} onReady={handleMotivationReady} />;
   }
 
+  if (timesheetLockedDate && employee) {
+    return (
+      <TimesheetLockScreen
+        employee={employee}
+        date={timesheetLockedDate}
+        onUnlocked={() => setTimesheetLockedDate(null)}
+      />
+    );
+  }
+
   if (screen === 'timer' && employee && session) {
     return (
       <TimerScreen
@@ -399,5 +483,14 @@ export default function App() {
     );
   }
 
-  return null;
+  return (
+    <>
+      {timesheetReminderDate && !timesheetLockedDate && (
+        <TimesheetReminderModal 
+          date={timesheetReminderDate} 
+          onDismiss={() => setTimesheetReminderDate(null)} 
+        />
+      )}
+    </>
+  );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import IdleReasonModal from './IdleReasonModal';
-import { Employee, WorkSession, createActivityLog, getMonitoringSettings } from '../lib/supabase';
+import { Employee, WorkSession, createActivityLog, createIdleAlert, getMonitoringSettings } from '../lib/supabase';
 
 export default function IdlePromptScreen() {
   const [employee, setEmployee] = useState<Employee | null>(null);
@@ -65,14 +65,30 @@ export default function IdlePromptScreen() {
         const api = (window as any).electronAPI;
         const activity = await api?.getLatestActivity?.();
         
+        const now = Date.now();
+        const durationSecs = idleStartTime ? Math.floor((now - idleStartTime) / 1000) : 0;
+        const idleReasonText = `${wasWorking ? 'Working' : 'Away'}: ${reason || 'No details provided'}`;
+
+        // Write to activity_logs table
         await createActivityLog({
           session_id: session.id,
           employee_id: employee.id,
           app_name: activity?.activeWindow?.appName || 'Unknown',
           window_title: activity?.activeWindow?.windowTitle || 'Unknown',
           activity_type: 'idle_reason',
-          idle_reason: `${wasWorking ? 'Working' : 'Away'}: ${reason || 'No details provided'}`,
+          idle_reason: idleReasonText,
+          duration_seconds: durationSecs,
           logged_at: new Date().toISOString(),
+        });
+
+        // Write to idle_alerts table
+        await createIdleAlert({
+          employee_id: employee.id,
+          session_id: session.id,
+          idle_since: idleStartTime ? new Date(idleStartTime).toISOString() : new Date().toISOString(),
+          response: wasWorking ? 'Working' : 'Away',
+          reason: reason || 'No details provided',
+          description: idleReasonText,
         });
       } catch (err) {
         console.error('Failed to save idle reason:', err);

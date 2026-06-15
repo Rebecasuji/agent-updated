@@ -1,5 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+console.log('[Preload] Loading preload script at', new Date().toISOString());
+
 // Preload script for security - exposes limited IPC APIs
 const electronAPI = {
   // Cache
@@ -58,7 +60,12 @@ const electronAPI = {
   saveSessionCache: (data) => ipcRenderer.invoke('save-session-cache', data),
   loadSessionCache: () => ipcRenderer.invoke('load-session-cache'),
   clearSessionCache: () => ipcRenderer.invoke('clear-session-cache'),
+  
+  // Debug environment
+  debugEnv: () => ipcRenderer.invoke('debug-env'),
+  
   checkTimesheetDb: (employeeCode) => ipcRenderer.invoke('check-timesheet-db', employeeCode),
+  checkTimesheetDbDebug: (employeeCode) => ipcRenderer.invoke('check-timesheet-db-debug', employeeCode),
   onSessionRestored: (callback) => {
     ipcRenderer.on('session-restored', (_event, data) => callback(data));
   },
@@ -72,6 +79,36 @@ const electronAPI = {
 
   // Email & Scheduler
   triggerDailySummaryEmails: () => ipcRenderer.invoke('trigger-daily-summary-emails'),
+
+  // PMS Integration
+  checkPMSNotifications: (empCode, lastCheckISO) => ipcRenderer.invoke('check-pms-notifications', empCode, lastCheckISO),
+  startPMSPoller: (empCode) => ipcRenderer.invoke('start-pms-poller', empCode),
+  stopPMSPoller: () => ipcRenderer.invoke('stop-pms-poller'),
+  dismissPMSNotification: () => ipcRenderer.invoke('dismiss-pms-notification'),
+  onPmsNotification: (callback) => {
+    ipcRenderer.on('pms-notification', (_event, data) => callback(data));
+  },
+  
+  // Timesheet Integration
+  startTimesheetPoller: (empCode) => ipcRenderer.invoke('start-timesheet-poller', empCode),
+  stopTimesheetPoller: () => ipcRenderer.invoke('stop-timesheet-poller'),
+  checkTimesheetsSubmittedBatch: (empCodes, dateStr) => ipcRenderer.invoke('check-timesheets-submitted-batch', empCodes, dateStr),
+  onTimesheetReminder: (callback) => {
+    ipcRenderer.on('timesheet-reminder', (_event, data) => callback(data));
+  },
+  onTimesheetStatus: (callback) => {
+    ipcRenderer.on('timesheet-status', (_event, data) => callback(data));
+  },
+  onTimesheetLock: (callback) => {
+    ipcRenderer.on('timesheet-lock', (_event, data) => callback(data));
+  },
+  onTimesheetUnlock: (callback) => {
+    ipcRenderer.on('timesheet-unlock', () => callback());
+  },
+  openTimesheetBrowser: () => ipcRenderer.invoke('open-timesheet-browser'),
+  verifyTimesheetRealtime: (empCode) => ipcRenderer.invoke('verify-timesheet-realtime', empCode),
+  getComplianceDetails: (empCode, empId, dateStr) => ipcRenderer.invoke('get-compliance-details', empCode, empId, dateStr),
+  lockSystem: () => ipcRenderer.invoke('lock-system'),
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

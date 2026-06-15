@@ -1,5 +1,5 @@
 import { useState, useEffect, FormEvent } from 'react';
-import { LogIn, User, Hash, Lock, Loader2 } from 'lucide-react';
+import { LogIn, User, Hash, Lock, Loader2, Apple } from 'lucide-react';
 import { Employee, WorkSession, loginEmployee, getTodaySession } from '../lib/supabase';
 import WindowControls from './WindowControls';
 
@@ -14,6 +14,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
+  const [platform, setPlatform] = useState<'windows' | 'macos' | 'unknown'>('unknown');
 
   // Load saved credentials on mount
   useEffect(() => {
@@ -29,6 +30,45 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
     } catch (err) {
       console.error('Failed to load saved credentials:', err);
     }
+  }, []);
+
+  // Detect platform (Windows vs macOS)
+  useEffect(() => {
+    const detectPlatform = async () => {
+      try {
+        const api = (window as any).electronAPI;
+        if (api?.invoke) {
+          // Running in Electron - check platform
+          try {
+            const result = await api.invoke('get-platform');
+            if (result === 'darwin') {
+              setPlatform('macos');
+            } else if (result === 'win32') {
+              setPlatform('windows');
+            }
+          } catch {
+            // If invoke fails, check process.platform via preload
+            const platformFromPreload = (window as any).__PLATFORM__;
+            if (platformFromPreload === 'darwin') {
+              setPlatform('macos');
+            } else if (platformFromPreload === 'win32') {
+              setPlatform('windows');
+            }
+          }
+        } else {
+          // Not in Electron, try to detect from navigator
+          if (navigator.userAgent.includes('Macintosh')) {
+            setPlatform('macos');
+          } else if (navigator.userAgent.includes('Windows')) {
+            setPlatform('windows');
+          }
+        }
+      } catch (err) {
+        console.error('Failed to detect platform:', err);
+      }
+    };
+
+    detectPlatform();
   }, []);
 
   const handleLogin = async (e: FormEvent) => {
@@ -89,7 +129,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
             activeSeconds: session.active_seconds || 0,
             idleSeconds: session.idle_seconds || 0,
             productiveSeconds: session.productive_seconds || 0,
-            sessionSeconds: Math.max(elapsedSeconds, (session.active_seconds || 0) + (session.idle_seconds || 0)),
+            sessionSeconds: (session.active_seconds || 0) + (session.idle_seconds || 0),
           };
           console.log('[Login] Initializing Electron session counters:', counters);
           await api.invoke('initialize-session-counters', counters.activeSeconds, counters.idleSeconds, counters.productiveSeconds, counters.sessionSeconds);
@@ -102,7 +142,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
               activeSeconds: session.active_seconds || 0,
               idleSeconds: session.idle_seconds || 0,
               productiveSeconds: session.productive_seconds || 0,
-              sessionSeconds: Math.max(elapsedSeconds, (session.active_seconds || 0) + (session.idle_seconds || 0)),
+              sessionSeconds: (session.active_seconds || 0) + (session.idle_seconds || 0),
             }),
           });
           if (response.ok) {
@@ -160,6 +200,22 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
           </div>
           <h1 className="text-3xl font-bold text-gray-800 tracking-tight">Knockturn</h1>
           <p className="text-pink-500 font-medium mt-1">Employee Productivity Agent</p>
+          
+          {/* Platform Badge */}
+          {platform !== 'unknown' && (
+            <div className="mt-3 inline-flex items-center gap-1.5">
+              {platform === 'macos' ? (
+                <div className="px-3 py-1 bg-blue-50 border border-blue-200 rounded-full text-xs font-semibold text-blue-700 flex items-center gap-1">
+                  <Apple className="w-3.5 h-3.5" />
+                  macOS Version
+                </div>
+              ) : (
+                <div className="px-3 py-1 bg-slate-50 border border-slate-200 rounded-full text-xs font-semibold text-slate-700">
+                  Windows Version
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Card */}
@@ -257,16 +313,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
       {/* Window controls - locked during login (must sign in before closing) */}
       <div className="fixed top-4 right-4 flex flex-col items-end gap-2">
-        <div className="text-xs font-semibold text-red-600 bg-red-50 px-3 py-1.5 rounded-full border border-red-200 flex items-center gap-1 whitespace-nowrap">
-          <Lock className="w-3 h-3" />
-          Focused Mode - Must Sign In
-        </div>
-        <WindowControls disabledClose={true} disabledMinimize={true} />
-      </div>
-
-      {/* Locked mode overlay message at bottom */}
-      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 text-xs text-gray-500 bg-gray-50 px-4 py-2 rounded-lg border border-gray-200 max-w-sm text-center">
-        🔒 <strong>Focused Mode Active:</strong> Please sign in to proceed with your work day. Other applications are temporarily locked.
+        <WindowControls disabledClose={true} />
       </div>
     </div>
   );

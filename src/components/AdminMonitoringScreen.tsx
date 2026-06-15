@@ -24,7 +24,11 @@ import {
   FileSpreadsheet,
   RefreshCw,
   Filter,
-  BarChart2
+  BarChart2,
+  Shield,
+  Eye,
+  Download,
+  X
 } from 'lucide-react';
 import {
   BarChart,
@@ -56,10 +60,15 @@ import {
   createEmployee,
   updateEmployee,
   updateEmployeeProductiveApps,
+  fetchAllRecentSessions,
+  fetchRecentTimesheetLockLogs,
   ActivityLog,
   WorkSession,
   MonitoringSettings as SettingsType,
-  AppClassification as ClassificationType
+  AppClassification as ClassificationType,
+  fetchAppSettings,
+  updateAppSetting,
+  logTimesheetLockEvent
 } from '../lib/supabase';
 
 
@@ -78,10 +87,21 @@ interface EmployeeQuickView {
   productivity: number;
   currentApp: string;
   sessionDuration: string;
+  totalSeconds: number;
+  activeSeconds: number;
+  idleSeconds: number;
+  productiveSeconds: number;
+  lastLockReason?: string | null;
   email?: string;
   position?: string;
   role?: string;
   productive_apps?: string[];
+  agentInstalled?: boolean;
+  lastSessionDate?: string;
+  employee_code?: string;
+  timesheetStatus?: boolean;
+  shift_start?: string;
+  shift_end?: string;
 }
 
 interface AdminMonitoringScreenProps {
@@ -91,7 +111,7 @@ interface AdminMonitoringScreenProps {
 const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout }) => {
   // Navigation State
   const [sidebarActive, setSidebarActive] = useState<
-    'dashboard' | 'employees' | 'monitoring' | 'reports' | 'analytics' | 'field_tracking' | 'settings' | 'profile'
+    'dashboard' | 'employees' | 'monitoring' | 'reports' | 'analytics' | 'field_tracking' | 'access_control' | 'settings' | 'profile'
   >('dashboard');
 
   // Inner Settings Tab State
@@ -129,6 +149,8 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
   const [loadingActivity, setLoadingActivity] = useState(false);
   const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [themeMode, setThemeMode] = useState<'light' | 'dark'>('light');
+  const [accessControlSearch, setAccessControlSearch] = useState('');
+  const [allRecentSessions, setAllRecentSessions] = useState<WorkSession[]>([]);
 
   // Employee Add / App Config State
   const [isAddEmployeeModalOpen, setIsAddEmployeeModalOpen] = useState(false);
@@ -141,7 +163,10 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
     role: 'employee',
     phone: '',
     employee_code: '',
-    password: ''
+    password: '',
+    shift_start: '',
+    shift_end: '',
+    timesheet_exempt: false
   });
   const [editingEmployeeId, setEditingEmployeeId] = useState<string | null>(null);
   const [employeeSearch, setEmployeeSearch] = useState('');
@@ -153,12 +178,270 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
   const [isSavingEmployee, setIsSavingEmployee] = useState(false);
   const [newConfigAppName, setNewConfigAppName] = useState('');
 
+  // Access Control State
+  const [accessControlDate, setAccessControlDate] = useState(() => {
+    const now = new Date();
+    const day = now.getDay();
+    if (day === 0) return '';
+    if (day === 1) {
+      now.setDate(now.getDate() - 2);
+    } else {
+      now.setDate(now.getDate() - 1);
+    }
+    return now.toISOString().slice(0, 10);
+  });
+  
+  // Timesheet Config State
+  const [tsCheckTime, setTsCheckTime] = useState('11:00');
+  const [tsWarnTime, setTsWarnTime] = useState('11:30');
+  const [tsLockTime, setTsLockTime] = useState('12:30');
+  const [enableLockEnforcement, setEnableLockEnforcement] = useState(true);
+  const [isSavingTsConfig, setIsSavingTsConfig] = useState(false);
+  const [releasingUserId, setReleasingUserId] = useState<string | null>(null);
+  
+  const [selectedComplianceDetails, setSelectedComplianceDetails] = useState<any>(null);
+  const [isComplianceModalOpen, setIsComplianceModalOpen] = useState(false);
+  const [isFetchingCompliance, setIsFetchingCompliance] = useState<string | null>(null);
+
+  const askForReason = async (message: string): Promise<string | null> => {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.style.position = 'fixed';
+      overlay.style.inset = '0';
+      overlay.style.backgroundColor = 'rgba(15, 23, 42, 0.8)';
+      overlay.style.display = 'flex';
+      overlay.style.alignItems = 'center';
+      overlay.style.justifyContent = 'center';
+      overlay.style.zIndex = '9999';
+
+      const dialog = document.createElement('div');
+      dialog.style.width = 'min(560px, 90vw)';
+      dialog.style.background = '#f8fafc';
+      dialog.style.borderRadius = '20px';
+      dialog.style.padding = '24px';
+      dialog.style.boxShadow = '0 20px 60px rgba(15, 23, 42, 0.25)';
+      dialog.style.color = '#0f172a';
+      dialog.style.fontFamily = 'system-ui, sans-serif';
+
+      const label = document.createElement('p');
+      label.textContent = message;
+      label.style.margin = '0 0 16px';
+      label.style.fontSize = '1rem';
+      label.style.lineHeight = '1.6';
+
+      const textarea = document.createElement('textarea');
+      textarea.style.width = '100%';
+      textarea.style.minHeight = '120px';
+      textarea.style.border = '1px solid rgba(148, 163, 184, 1)';
+      textarea.style.borderRadius = '12px';
+      textarea.style.padding = '12px';
+      textarea.style.fontSize = '0.95rem';
+      textarea.style.resize = 'vertical';
+      textarea.style.marginBottom = '16px';
+
+      const buttonRow = document.createElement('div');
+      buttonRow.style.display = 'flex';
+      buttonRow.style.justifyContent = 'flex-end';
+      buttonRow.style.gap = '12px';
+
+      const cancelButton = document.createElement('button');
+      cancelButton.textContent = 'Cancel';
+      cancelButton.style.padding = '10px 16px';
+      cancelButton.style.borderRadius = '9999px';
+      cancelButton.style.border = '1px solid rgba(148, 163, 184, 1)';
+      cancelButton.style.background = '#ffffff';
+      cancelButton.style.color = '#0f172a';
+      cancelButton.style.cursor = 'pointer';
+
+      const confirmButton = document.createElement('button');
+      confirmButton.textContent = 'Confirm';
+      confirmButton.style.padding = '10px 16px';
+      confirmButton.style.borderRadius = '9999px';
+      confirmButton.style.border = 'none';
+      confirmButton.style.background = '#2563eb';
+      confirmButton.style.color = '#ffffff';
+      confirmButton.style.cursor = 'pointer';
+
+      const cleanup = () => {
+        document.body.removeChild(overlay);
+      };
+
+      cancelButton.onclick = () => {
+        cleanup();
+        resolve(null);
+      };
+
+      confirmButton.onclick = () => {
+        cleanup();
+        resolve(textarea.value.trim() || null);
+      };
+
+      buttonRow.appendChild(cancelButton);
+      buttonRow.appendChild(confirmButton);
+      dialog.appendChild(label);
+      dialog.appendChild(textarea);
+      dialog.appendChild(buttonRow);
+      overlay.appendChild(dialog);
+      document.body.appendChild(overlay);
+      textarea.focus();
+    });
+  };
+
   // Reports State
   const [reportPeriod, setReportPeriod] = useState<'Daily' | 'Weekly' | 'Monthly'>('Daily');
   const [reportStartDate, setReportStartDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [reportEndDate, setReportEndDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [reportDeptFilter, setReportDeptFilter] = useState('All Departments');
   const [reportSearch, setReportSearch] = useState('');
+  // Reports inner tab: 'summary' | 'chart' | 'exports'
+  const [reportInnerTab, setReportInnerTab] = useState<'summary' | 'chart' | 'exports'>('summary');
+
+  // Export Archives State
+  interface ReportArchive {
+    id: string;
+    export_date: string;
+    status: 'SUCCESS' | 'FAILED';
+    archive_url: string | null;
+    archive_size_bytes: number;
+    records_exported: number;
+    records_deleted: number;
+    error_message: string | null;
+    created_at: string;
+  }
+  const [archivesData, setArchivesData] = React.useState<ReportArchive[]>([]);
+  const [archivesLoading, setArchivesLoading] = React.useState(false);
+  const [exportingDate, setExportingDate] = React.useState('');
+  const [manualBackendUrl, setManualBackendUrl] = React.useState('http://localhost:3001');
+  const [manualExportDate, setManualExportDate] = React.useState(() => {
+    const d = new Date(); d.setDate(d.getDate() - 1); return d.toISOString().slice(0, 10);
+  });
+  const [triggeringExport, setTriggeringExport] = React.useState(false);
+  const [exportMsg, setExportMsg] = React.useState<{type: 'success'|'error', text: string} | null>(null);
+
+  const fetchArchives = React.useCallback(async () => {
+    setArchivesLoading(true);
+    try {
+      const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+      const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+      const resp = await fetch(
+        `${SUPABASE_URL}/rest/v1/report_archives?select=*&order=export_date.desc&limit=30`,
+        { headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` } }
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        setArchivesData(data as ReportArchive[]);
+      }
+    } catch (e) {
+      console.error('Failed to fetch archives:', e);
+    } finally {
+      setArchivesLoading(false);
+    }
+  }, []);
+
+  const triggerManualExport = async (dateStr: string) => {
+    setTriggeringExport(true);
+    setExportMsg(null);
+    try {
+      const resp = await fetch(`${manualBackendUrl}/api/export/specific-date`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: dateStr })
+      });
+      const result = await resp.json();
+      if (result.success) {
+        setExportMsg({ type: 'success', text: `Export for ${dateStr} completed! Archive is ready.` });
+        fetchArchives();
+      } else {
+        setExportMsg({ type: 'error', text: `Export failed: ${result.error || 'Unknown error'}` });
+      }
+    } catch (err: any) {
+      setExportMsg({ type: 'error', text: `Could not connect to backend service. Ensure it is running on port 3001. Error: ${err.message}` });
+    } finally {
+      setTriggeringExport(false);
+    }
+  };
+
+  // Attendance Chart State
+  interface AttendanceDayStatus { date: string; status: 'P' | 'A' | 'HP' | 'L' | 'H' | 'NW'; }
+  interface AttendanceRow {
+    employee_id: string;
+    employee_code: string;
+    employee_name: string;
+    days: AttendanceDayStatus[];
+    presentDays: number;
+    absentDays: number;
+    expectedDays: number;
+  }
+  const [attendanceRows, setAttendanceRows] = useState<AttendanceRow[]>([]);
+  const [attendanceDates, setAttendanceDates] = useState<string[]>([]);
+  const [loadingAttendance, setLoadingAttendance] = useState(false);
+
+  const fetchAttendanceChart = async (start: string, end: string) => {
+    setLoadingAttendance(true);
+    try {
+      // Build list of dates in range
+      const dates: string[] = [];
+      const cur = new Date(start);
+      const endD = new Date(end);
+      while (cur <= endD) {
+        dates.push(cur.toISOString().slice(0, 10));
+        cur.setDate(cur.getDate() + 1);
+      }
+      setAttendanceDates(dates);
+
+      // Fetch all employees
+      const employees = await fetchAllEmployees();
+
+      // Fetch work_sessions for the date range using supabase directly
+      const { supabase } = await import('../lib/supabase');
+      const { data: sessions } = await supabase
+        .from('work_sessions')
+        .select('employee_id, session_date, active_seconds')
+        .gte('session_date', start)
+        .lte('session_date', end);
+
+      // Build a map: employee_id -> date -> session
+      const sessionMap = new Map<string, Map<string, number>>();
+      (sessions || []).forEach((s: any) => {
+        if (!sessionMap.has(s.employee_id)) sessionMap.set(s.employee_id, new Map());
+        sessionMap.get(s.employee_id)!.set(s.session_date, s.active_seconds || 0);
+      });
+
+      const rows: AttendanceRow[] = employees.map((emp: any) => {
+        const empSessions = sessionMap.get(emp.id) || new Map<string, number>();
+        const days: AttendanceDayStatus[] = dates.map(date => {
+          const d = new Date(date);
+          const dow = d.getDay();
+          if (dow === 0) return { date, status: 'NW' as const }; // Sunday = Week Off
+          const activeSeconds = empSessions.get(date);
+          if (activeSeconds === undefined) return { date, status: 'A' as const };
+          if (activeSeconds >= 14400) return { date, status: 'P' as const }; // >= 4h = Present
+          if (activeSeconds > 0) return { date, status: 'HP' as const }; // some activity = Half Present
+          return { date, status: 'A' as const };
+        });
+        const workDays = days.filter(d => d.status !== 'NW' && d.status !== 'H');
+        const presentDays = days.filter(d => d.status === 'P').length;
+        const halfDays = days.filter(d => d.status === 'HP').length;
+        const absentDays = days.filter(d => d.status === 'A').length;
+        return {
+          employee_id: emp.id,
+          employee_code: emp.employee_code || '',
+          employee_name: emp.employee_name || emp.first_name || emp.name || '',
+          days,
+          presentDays: presentDays + Math.floor(halfDays / 2),
+          absentDays,
+          expectedDays: workDays.length,
+        };
+      });
+
+      setAttendanceRows(rows);
+    } catch (err) {
+      console.error('Failed to fetch attendance chart:', err);
+    } finally {
+      setLoadingAttendance(false);
+    }
+  };
+
 
   // Analytics State
   const [selectedAnalyticsEmployee, setSelectedAnalyticsEmployee] = useState<string>('all');
@@ -201,6 +484,14 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
 
         const appClasses = await getAppClassifications();
         setClassifications(appClasses);
+
+        const tsSettings = await fetchAppSettings();
+        if (tsSettings) {
+          if (tsSettings.timesheet_check_time) setTsCheckTime(tsSettings.timesheet_check_time);
+          if (tsSettings.timesheet_warning_time) setTsWarnTime(tsSettings.timesheet_warning_time);
+          if (tsSettings.timesheet_lock_time) setTsLockTime(tsSettings.timesheet_lock_time);
+          if (tsSettings.enable_lock_screen_enforcement !== undefined) setEnableLockEnforcement(tsSettings.enable_lock_screen_enforcement === 'true');
+        }
       } catch (err) {
         console.error('Failed to load settings:', err);
       }
@@ -209,94 +500,177 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
   }, []);
 
   // Fetch Dashboard Stats
-  useEffect(() => {
-    const loadAdminStats = async () => {
+  const loadAdminStats = async () => {
+    try {
+      const [employees, sessions, logs, allSessions, lockLogs] = await Promise.all([
+        fetchAllEmployees(),
+        fetchRecentSessions(100),
+        fetchRecentActivityLogs(100),
+        fetchAllRecentSessions(),
+        fetchRecentTimesheetLockLogs(200),
+      ]);
+
+      const sessionMap = new Map<string, WorkSession>();
+      sessions.forEach((session) => sessionMap.set(session.employee_id, session));
+
+      const latestLockReasonByEmployee = new Map<string, string>();
+      lockLogs.forEach((log) => {
+        if (!latestLockReasonByEmployee.has(log.employee_id)) {
+          if (log.reason && log.reason.trim()) {
+            latestLockReasonByEmployee.set(log.employee_id, log.reason.trim());
+          }
+        }
+      });
+
+      const updatedEmployeeList: EmployeeQuickView[] = employees.map((employee) => {
+        const session = sessionMap.get(employee.id);
+        const currentLog = logs.find((log) => log.employee_id === employee.id);
+        const activeSeconds = session?.active_seconds ?? 0;
+        const idleSeconds = session?.idle_seconds ?? 0;
+        const productiveSeconds = session?.productive_seconds ?? 0;
+        const totalSeconds = activeSeconds + idleSeconds;
+        const productivity = activeSeconds > 0
+          ? Math.round((productiveSeconds / activeSeconds) * 100)
+          : 0;
+
+        const empSessions = allSessions.filter(s => s.employee_id === employee.id);
+        const hasValidSession = empSessions.some(s => s.punch_in_time !== null || s.active_seconds > 0 || s.idle_seconds > 0);
+        const agentInstalled = hasValidSession;
+        const lastSessionDate = empSessions.length > 0 ? empSessions[0].session_date : 'Never';
+
+        return {
+          id: employee.id,
+          name: employee.employee_name,
+          department: employee.department || (employee.role === 'admin' ? 'Administration' : 'Productivity Dept'),
+          email: employee.email || '',
+          position: employee.position || '',
+          role: employee.role || 'employee',
+          productive_apps: employee.productive_apps || [],
+          status: activeSeconds > 0 ? 'online' : 'offline',
+          productivity,
+          currentApp: currentLog?.app_name ?? 'None',
+          sessionDuration: totalSeconds > 0
+            ? `${Math.floor(totalSeconds / 3600)}h ${Math.floor((totalSeconds % 3600) / 60)}m`
+            : 'N/A',
+          totalSeconds,
+          activeSeconds,
+          idleSeconds,
+          productiveSeconds,
+          lastLockReason: latestLockReasonByEmployee.get(employee.id) ?? null,
+          agentInstalled,
+          lastSessionDate,
+          employee_code: employee.employee_code,
+          timesheetStatus: true, // Will update below
+          shift_start: employee.shift_start,
+          shift_end: employee.shift_end,
+        };
+      });
+
+      // Fetch batch timesheet status
       try {
-        const [employees, sessions, logs] = await Promise.all([
-          fetchAllEmployees(),
-          fetchRecentSessions(100),
-          fetchRecentActivityLogs(100),
-        ]);
-
-        const sessionMap = new Map<string, WorkSession>();
-        sessions.forEach((session) => sessionMap.set(session.employee_id, session));
-
-        const updatedEmployeeList: EmployeeQuickView[] = employees.map((employee) => {
-          const session = sessionMap.get(employee.id);
-          const currentLog = logs.find((log) => log.employee_id === employee.id);
-          const activeSeconds = session?.active_seconds ?? 0;
-          const productiveSeconds = session?.productive_seconds ?? 0;
-          const productivity = activeSeconds > 0
-            ? Math.round((productiveSeconds / activeSeconds) * 100)
-            : 0;
-
-          return {
-            id: employee.id,
-            name: employee.employee_name,
-            department: employee.department || (employee.role === 'admin' ? 'Administration' : 'Productivity Dept'),
-            email: employee.email || '',
-            position: employee.position || '',
-            role: employee.role || 'employee',
-            productive_apps: employee.productive_apps || [],
-            status: activeSeconds > 0 ? 'online' : 'offline',
-            productivity,
-            currentApp: currentLog?.app_name ?? 'None',
-            sessionDuration: session?.punch_in_time
-              ? `${Math.floor((Date.now() - new Date(session.punch_in_time).getTime()) / 3600000)}h ${Math.floor(((Date.now() - new Date(session.punch_in_time).getTime()) % 3600000) / 60000)}m`
-              : 'N/A',
-          };
-        });
-
-        const statusCounts = { online: 0, idle: 0, away: 0, offline: 0 };
-        updatedEmployeeList.forEach((emp) => {
-          statusCounts[emp.status] += 1;
-        });
-
-        setEmployeesList(updatedEmployeeList);
-        setStatusDistribution([
-          { name: 'Online', value: statusCounts.online, color: '#10b981' },
-          { name: 'Idle', value: statusCounts.idle, color: '#f59e0b' },
-          { name: 'Away', value: statusCounts.away, color: '#ef4444' },
-          { name: 'Offline', value: statusCounts.offline, color: '#9ca3af' },
-        ]);
-
-        setRecentActivityLogs(logs.slice(0, 8));
-
-        const chartMap = new Map<string, { productivity: number; active: number; count: number }>();
-        sessions.forEach((session) => {
-          const day = session.session_date;
-          const prev = chartMap.get(day) ?? { productivity: 0, active: 0, count: 0 };
-          const productivity = session.active_seconds > 0
-            ? Math.round((session.productive_seconds / session.active_seconds) * 100)
-            : 0;
-          chartMap.set(day, {
-            productivity: prev.productivity + productivity,
-            active: prev.active + session.active_seconds,
-            count: prev.count + 1,
-          });
-        });
-
-        const chartData = Array.from(chartMap.entries())
-          .slice(-7)
-          .map(([name, values]) => ({
-            name,
-            productivity: Math.round(values.productivity / values.count),
-            active: Math.round(values.active / values.count),
-          }));
-
-        if (chartData.length > 0) {
-          setChartData(chartData);
+        const eApi = (window as any).electronAPI;
+        if (eApi?.checkTimesheetsSubmittedBatch) {
+          const empCodes = updatedEmployeeList
+            .map(e => e.employee_code)
+            .filter((c): c is string => !!c);
+          
+          if (empCodes.length > 0) {
+            const { results } = await eApi.checkTimesheetsSubmittedBatch(empCodes, accessControlDate);
+            updatedEmployeeList.forEach(e => {
+              if (e.employee_code && typeof results[e.employee_code] !== 'undefined') {
+                e.timesheetStatus = results[e.employee_code];
+              }
+            });
+          }
         }
       } catch (err) {
-        console.error('Failed to load stats:', err);
+        console.error('Failed to fetch batch timesheet status', err);
       }
-    };
 
+      const statusCounts = { online: 0, idle: 0, away: 0, offline: 0 };
+      updatedEmployeeList.forEach((emp) => {
+        statusCounts[emp.status] += 1;
+      });
+
+      setEmployeesList(updatedEmployeeList);
+      setAllRecentSessions(allSessions);
+      setStatusDistribution([
+        { name: 'Online', value: statusCounts.online, color: '#10b981' },
+        { name: 'Idle', value: statusCounts.idle, color: '#f59e0b' },
+        { name: 'Away', value: statusCounts.away, color: '#ef4444' },
+        { name: 'Offline', value: statusCounts.offline, color: '#9ca3af' },
+      ]);
+
+      setRecentActivityLogs(logs.slice(0, 8));
+
+      const chartMap = new Map<string, { productivity: number; active: number; count: number }>();
+      sessions.forEach((session) => {
+        const day = session.session_date;
+        const prev = chartMap.get(day) ?? { productivity: 0, active: 0, count: 0 };
+        const productivity = session.active_seconds > 0
+          ? Math.round((session.productive_seconds / session.active_seconds) * 100)
+          : 0;
+        chartMap.set(day, {
+          productivity: prev.productivity + productivity,
+          active: prev.active + session.active_seconds,
+          count: prev.count + 1,
+        });
+      });
+
+      const chartData = Array.from(chartMap.entries())
+        .slice(-7)
+        .map(([name, values]) => ({
+          name,
+          productivity: Math.round(values.productivity / values.count),
+          active: Math.round(values.active / values.count),
+        }));
+
+      if (chartData.length > 0) {
+        setChartData(chartData);
+      }
+    } catch (err) {
+      console.error('Failed to load stats:', err);
+    }
+  };
+
+  useEffect(() => {
     loadAdminStats();
-    const interval = setInterval(loadAdminStats, 30000);
+    const interval = setInterval(loadAdminStats, 60000);
     return () => clearInterval(interval);
   }, []);
 
+  // Fetch Timesheet Status when accessControlDate changes
+  useEffect(() => {
+    const fetchTimesheetStatuses = async () => {
+      try {
+        const eApi = (window as any).electronAPI;
+        if (eApi?.checkTimesheetsSubmittedBatch && accessControlDate && employeesList.length > 0) {
+          const empCodes = employeesList
+            .map(e => e.employee_code)
+            .filter((c): c is string => !!c);
+          
+          if (empCodes.length > 0) {
+            const { results } = await eApi.checkTimesheetsSubmittedBatch(empCodes, accessControlDate);
+            setEmployeesList(prev => prev.map(e => {
+              if (e.employee_code && typeof results[e.employee_code] !== 'undefined') {
+                return { ...e, timesheetStatus: results[e.employee_code] };
+              }
+              return e;
+            }));
+          }
+        }
+      } catch (err) {
+        console.error('Failed to fetch batch timesheet status', err);
+      }
+    };
+    
+    // Only refetch if we already have employees loaded (initial load is handled by loadAdminStats)
+    if (employeesList.length > 0) {
+      fetchTimesheetStatuses();
+    }
+  }, [accessControlDate]);
+
+  // Handlers
   const totalEmployees = employeesList.length;
   const activeEmployees = employeesList.filter((emp) => emp.status === 'online').length;
   const avgProductivity = employeesList.length > 0
@@ -408,6 +782,100 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
     }
   };
 
+  const handleSaveTsConfig = async () => {
+    setIsSavingTsConfig(true);
+    try {
+      await updateAppSetting('timesheet_check_time', tsCheckTime);
+      await updateAppSetting('timesheet_warning_time', tsWarnTime);
+      await updateAppSetting('timesheet_lock_time', tsLockTime);
+      await updateAppSetting('enable_lock_screen_enforcement', enableLockEnforcement ? 'true' : 'false');
+      
+      setToastMessage('Timesheet config saved successfully!');
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 3000);
+    } catch (e) {
+      console.error(e);
+      alert("Error saving config");
+    } finally {
+      setIsSavingTsConfig(false);
+    }
+  };
+
+  const handleLockUser = async (emp: EmployeeQuickView) => {
+    const reason = await askForReason(`Reason for locking ${emp.name}?`);
+    if (!reason) return;
+
+    setReleasingUserId(emp.id); // Reuse state for loading
+    try {
+      // Log event in DB
+      await logTimesheetLockEvent(emp.id, emp.name, 'MANUAL_LOCK', undefined, 'Administrator', reason);
+      
+      if (emp.status !== 'online') {
+        setToastMessage(`Employee is offline. Lock command will be applied when the Agent reconnects.`);
+      } else {
+        setToastMessage(`Locked ${emp.name} successfully!`);
+      }
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 3000);
+
+      // Mark them as not submitted (locked) locally for UI
+      setEmployeesList(prev => prev.map(e => e.id === emp.id ? { ...e, timesheetStatus: false } : e));
+    } catch (e) {
+      console.error(e);
+      alert("Failed to lock user.");
+    } finally {
+      setReleasingUserId(null);
+    }
+  };
+
+  const handleReleaseUser = async (emp: EmployeeQuickView) => {
+    const reason = await askForReason(`Reason for releasing ${emp.name}?`);
+    if (!reason) return;
+
+    setReleasingUserId(emp.id);
+    try {
+      // Log event in DB
+      await logTimesheetLockEvent(emp.id, emp.name, 'MANUAL_UNLOCK', undefined, 'Administrator', reason);
+      
+      setToastMessage(`Unlocked ${emp.name} successfully!`);
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 3000);
+
+      // We just mark them as submitted locally for UI
+      setEmployeesList(prev => prev.map(e => e.id === emp.id ? { ...e, timesheetStatus: true } : e));
+    } catch (e) {
+      console.error(e);
+      alert("Failed to release user.");
+    } finally {
+      setReleasingUserId(null);
+    }
+  };
+
+  const handleViewCompliance = async (emp: EmployeeQuickView) => {
+    setIsFetchingCompliance(emp.id);
+    try {
+      const eApi = (window as any).electronAPI;
+      if (eApi?.getComplianceDetails) {
+        const details = await eApi.getComplianceDetails(emp.employee_code || '', emp.id, accessControlDate);
+        if (details && !details.error) {
+          setSelectedComplianceDetails(details);
+          setIsComplianceModalOpen(true);
+        } else if (details?.error) {
+          alert(`Could not fetch compliance details: ${details.error}\n\nEmployee ID: ${emp.id}\nEmployee Code: ${emp.employee_code || 'Not set'}`);
+        } else {
+          alert('Could not fetch compliance details. Please check the employee record and try again.');
+        }
+      } else {
+        alert('Compliance API not available (not running in Electron).');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Error fetching compliance details.');
+    } finally {
+      setIsFetchingCompliance(null);
+    }
+  };
+
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'online': return 'bg-emerald-100 text-emerald-800';
@@ -435,6 +903,9 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
         department: newEmployee.department,
         role: newEmployee.role as any,
         phone: newEmployee.phone,
+        shift_start: newEmployee.shift_start || null,
+        shift_end: newEmployee.shift_end || null,
+        timesheet_exempt: newEmployee.timesheet_exempt
       };
       if (newEmployee.password) {
         empData.password_hash = newEmployee.password;
@@ -455,29 +926,10 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
         setEditingEmployeeId(null);
         setNewEmployee({
           first_name: '', last_name: '', email: '', position: '', department: '',
-          role: 'employee', phone: '', employee_code: '', password: ''
+          role: 'employee', phone: '', employee_code: '', password: '', shift_start: '', shift_end: '', timesheet_exempt: false
         });
         // Refresh employee list
-        const employees = await fetchAllEmployees();
-        const sessions = await fetchRecentSessions(100);
-        const sessionMap = new Map();
-        sessions.forEach((s: any) => sessionMap.set(s.employee_id, s));
-        setEmployeesList(employees.map((emp: any) => {
-          const session = sessionMap.get(emp.id);
-          return {
-            id: emp.id,
-            name: emp.employee_name,
-            department: emp.department || 'Productivity Dept',
-            email: emp.email || '',
-            position: emp.position || '',
-            role: emp.role || 'employee',
-            productive_apps: emp.productive_apps || [],
-            status: session?.active_seconds > 0 ? 'online' : 'offline' as const,
-            productivity: 0,
-            currentApp: 'None',
-            sessionDuration: 'N/A'
-          };
-        }));
+        await loadAdminStats();
         setTimeout(() => setShowToast(false), 3000);
       } else {
         alert(editingEmployeeId ? "Failed to update employee." : "Failed to add employee.");
@@ -527,12 +979,9 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
     .filter(e => !reportSearch || e.name.toLowerCase().includes(reportSearch.toLowerCase()));
 
   const reportStats = filteredReportList.reduce((acc, e) => {
-    const parts = e.sessionDuration !== 'N/A' ? e.sessionDuration.split(/[hm]/) : ['0','0'];
-    const hours = parseInt(parts[0]) || 0;
-    const mins = parseInt(parts[1]) || 0;
-    const totalHrs = (hours + mins/60);
-    const activeHrs = totalHrs * (e.productivity / 100);
-    const idleHrs = totalHrs * (1 - e.productivity / 100);
+    const totalHrs = e.totalSeconds / 3600;
+    const activeHrs = e.activeSeconds / 3600;
+    const idleHrs = e.idleSeconds / 3600;
     
     acc.total += totalHrs;
     acc.active += activeHrs;
@@ -547,12 +996,9 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
     const headers = ['Employee', 'Department', 'Total Hours', 'Active Hours', 'Idle Hours', 'Productivity'];
     
     const rows = filteredReportList.map(e => {
-      const parts = e.sessionDuration !== 'N/A' ? e.sessionDuration.split(/[hm]/) : ['0','0'];
-      const hours = parseInt(parts[0]) || 0;
-      const mins = parseInt(parts[1]) || 0;
-      const totalHrs = (hours + mins/60).toFixed(1);
-      const activeHrs = ((hours + mins/60) * (e.productivity / 100)).toFixed(1);
-      const idleHrs = ((hours + mins/60) * (1 - e.productivity / 100)).toFixed(1);
+      const totalHrs = (e.totalSeconds / 3600).toFixed(1);
+      const activeHrs = (e.activeSeconds / 3600).toFixed(1);
+      const idleHrs = (e.idleSeconds / 3600).toFixed(1);
       
       return [
         `"${e.name}"`, 
@@ -654,6 +1100,16 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
             >
               <MapPin className="w-4 h-4" />
               Field Tracking
+            </button>
+            <button
+              onClick={() => setSidebarActive('access_control')}
+              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition ${sidebarActive === 'access_control'
+                ? 'bg-blue-50 text-blue-600'
+                : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'
+                }`}
+            >
+              <Shield className="w-4 h-4" />
+              Access Control
             </button>
             <button
               onClick={() => setSidebarActive('settings')}
@@ -1440,7 +1896,7 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
                   <button 
                     onClick={() => {
                       setEditingEmployeeId(null);
-                      setNewEmployee({ first_name: '', last_name: '', email: '', position: '', department: '', role: 'employee', phone: '', employee_code: '', password: '' });
+                      setNewEmployee({ first_name: '', last_name: '', email: '', position: '', department: '', role: 'employee', phone: '', employee_code: '', password: '', shift_start: '', shift_end: '', timesheet_exempt: false });
                       setIsAddEmployeeModalOpen(true);
                     }}
                     className="flex items-center gap-2 bg-[#0ea5e9] text-white text-sm font-semibold px-4 py-2.5 rounded-lg hover:bg-sky-600 transition shadow-sm"
@@ -1566,8 +2022,11 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
                                     department: e.department && e.department !== 'Administration' && e.department !== 'Productivity Dept' ? e.department : '',
                                     role: e.role || 'employee',
                                     phone: '', // Need proper API fetch if we want phone, skipping for now
-                                    employee_code: '', // Same, leaving blank here since we don't return it in quickview
-                                    password: ''
+                                    employee_code: e.employee_code || '', 
+                                    password: '',
+                                    shift_start: e.shift_start || '',
+                                    shift_end: e.shift_end || '',
+                                    timesheet_exempt: (e as any).timesheet_exempt || false
                                   });
                                   setIsAddEmployeeModalOpen(true);
                                 }}
@@ -1713,6 +2172,31 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
                         />
                     </div>
                   </div>
+
+                  {/* Shift Timings */}
+                  <div className="pt-4 mt-4 border-t border-slate-100 grid grid-cols-2 gap-5">
+                    <div className="space-y-1.5">
+                        <label className="text-sm font-semibold text-slate-700">Shift Start (Mobile Tracking) <span className="text-slate-400 font-normal ml-1">(Optional)</span></label>
+                        <input 
+                          type="time" 
+                          value={newEmployee.shift_start}
+                          onChange={(e) => setNewEmployee({...newEmployee, shift_start: e.target.value})}
+                          className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 text-sm focus:bg-white focus:border-blue-500 outline-none transition"
+                        />
+                    </div>
+                    <div className="space-y-1.5">
+                        <label className="text-sm font-semibold text-slate-700">Shift End (Mobile Tracking) <span className="text-slate-400 font-normal ml-1">(Optional)</span></label>
+                        <input 
+                          type="time" 
+                          value={newEmployee.shift_end}
+                          onChange={(e) => setNewEmployee({...newEmployee, shift_end: e.target.value})}
+                          className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 text-sm focus:bg-white focus:border-blue-500 outline-none transition"
+                        />
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-3">
+                    <span className="font-semibold text-slate-600">Note:</span> If shift timings are provided, the mobile app will only track locations and calls during these hours. Computer tracking is unaffected and will always track.
+                  </p>
                 </div>
 
                 <div className="px-6 py-4 border-t border-slate-100 flex items-center justify-end gap-3 bg-slate-50">
@@ -1956,86 +2440,413 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
                   </div>
               </div>
 
-              {/* Metric Cards */}
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-                  <p className="text-xs font-semibold text-slate-500">Total Hours</p>
-                  <p className="text-2xl font-bold text-blue-600 mt-2">{reportStats.total.toFixed(1)}h</p>
-                </div>
-                <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-                  <p className="text-xs font-semibold text-slate-500">Active Hours</p>
-                  <p className="text-2xl font-bold text-emerald-500 mt-2">{reportStats.active.toFixed(1)}h</p>
-                </div>
-                <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-                  <p className="text-xs font-semibold text-slate-500">Idle Hours</p>
-                  <p className="text-2xl font-bold text-amber-500 mt-2">{reportStats.idle.toFixed(1)}h</p>
-                </div>
-                <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-                  <p className="text-xs font-semibold text-slate-500">Avg Productivity</p>
-                  <p className="text-2xl font-bold text-blue-500 mt-2">{Math.round(avgReportProd)}%</p>
-                </div>
+              {/* Inner Tab Bar: Summary | Chart | Exports */}
+              <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl w-fit">
+                {[
+                  { id: 'summary', label: 'Summary' },
+                  { id: 'chart', label: '📊 Chart' },
+                  { id: 'exports', label: '📥 Data Exports' },
+                ].map(tab => (
+                  <button
+                    key={tab.id}
+                    onClick={() => {
+                      setReportInnerTab(tab.id as any);
+                      if (tab.id === 'chart') fetchAttendanceChart(reportStartDate, reportEndDate);
+                      if (tab.id === 'exports') fetchArchives();
+                    }}
+                    className={`px-5 py-1.5 rounded-lg text-sm font-semibold transition ${
+                      reportInnerTab === tab.id
+                        ? 'bg-white text-teal-600 shadow-sm border border-slate-200/60'
+                        : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
               </div>
 
-              {/* Reports Table */}
-              <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden min-h-[300px]">
-                <table className="w-full text-left text-sm border-collapse">
-                  <thead className="bg-slate-50 border-b border-slate-100">
-                    <tr className="text-slate-500 font-semibold text-xs uppercase tracking-wider">
-                      <th className="py-4 px-6">EMPLOYEE</th>
-                      <th className="py-4 px-6">DEPARTMENT</th>
-                      <th className="py-4 px-6">TOTAL HOURS</th>
-                      <th className="py-4 px-6">ACTIVE</th>
-                      <th className="py-4 px-6">IDLE</th>
-                      <th className="py-4 px-6">PRODUCTIVITY</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {filteredReportList.length === 0 ? (
-                      <tr>
-                        <td colSpan={6} className="text-center py-20 text-slate-400">
-                          <p className="font-medium text-slate-500">No data for this period</p>
-                        </td>
-                      </tr>
-                    ) : (
-                      filteredReportList.map(e => {
-                        const parts = e.sessionDuration !== 'N/A' ? e.sessionDuration.split(/[hm]/) : ['0','0'];
-                        const hours = parseInt(parts[0]) || 0;
-                        const mins = parseInt(parts[1]) || 0;
-                        const totalHrs = (hours + mins/60).toFixed(1);
-                        const activeHrs = ((hours + mins/60) * (e.productivity / 100)).toFixed(1);
-                        const idleHrs = ((hours + mins/60) * (1 - e.productivity / 100)).toFixed(1);
+              {reportInnerTab === 'summary' && (
+                <>
+                  {/* Metric Cards */}
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                      <p className="text-xs font-semibold text-slate-500">Total Hours</p>
+                      <p className="text-2xl font-bold text-blue-600 mt-2">{reportStats.total.toFixed(1)}h</p>
+                    </div>
+                    <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                      <p className="text-xs font-semibold text-slate-500">Active Hours</p>
+                      <p className="text-2xl font-bold text-emerald-500 mt-2">{reportStats.active.toFixed(1)}h</p>
+                    </div>
+                    <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                      <p className="text-xs font-semibold text-slate-500">Idle Hours</p>
+                      <p className="text-2xl font-bold text-amber-500 mt-2">{reportStats.idle.toFixed(1)}h</p>
+                    </div>
+                    <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                      <p className="text-xs font-semibold text-slate-500">Avg Productivity</p>
+                      <p className="text-2xl font-bold text-blue-500 mt-2">{Math.round(avgReportProd)}%</p>
+                    </div>
+                  </div>
 
-                        return (
-                          <tr key={e.id} className="hover:bg-slate-50/50 transition">
-                            <td className="py-4 px-6">
-                              <div className="flex items-center gap-3">
-                                <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-600 font-bold flex items-center justify-center shrink-0 text-xs">
-                                  {e.name.charAt(0).toUpperCase()}
-                                </div>
-                                <div>
-                                  <p className="font-semibold text-slate-800">{e.name}</p>
-                                  <p className="text-xs text-slate-500">{e.email || '—'}</p>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="py-4 px-6 text-slate-600 font-medium">{e.department}</td>
-                            <td className="py-4 px-6 font-semibold text-slate-700">{totalHrs}h</td>
-                            <td className="py-4 px-6 text-emerald-600 font-medium">{activeHrs}h</td>
-                            <td className="py-4 px-6 text-amber-500 font-medium">{idleHrs}h</td>
-                            <td className="py-4 px-6">
-                              <span className={`font-bold ${getProductivityColor(e.productivity)}`}>
-                                {Math.round(e.productivity)}%
-                              </span>
+                  {/* Reports Table */}
+                  <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden min-h-[300px]">
+                    <table className="w-full text-left text-sm border-collapse">
+                      <thead className="bg-slate-50 border-b border-slate-100">
+                        <tr className="text-slate-500 font-semibold text-xs uppercase tracking-wider">
+                          <th className="py-4 px-6">EMPLOYEE</th>
+                          <th className="py-4 px-6">DEPARTMENT</th>
+                          <th className="py-4 px-6">TOTAL HOURS</th>
+                          <th className="py-4 px-6">ACTIVE</th>
+                          <th className="py-4 px-6">IDLE</th>
+                          <th className="py-4 px-6">PRODUCTIVITY</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {filteredReportList.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="text-center py-20 text-slate-400">
+                              <p className="font-medium text-slate-500">No data for this period</p>
                             </td>
                           </tr>
-                        );
-                      })
+                        ) : (
+                          filteredReportList.map(e => {
+                            const totalHrs = (e.totalSeconds / 3600).toFixed(1);
+                            const activeHrs = (e.activeSeconds / 3600).toFixed(1);
+                            const idleHrs = (e.idleSeconds / 3600).toFixed(1);
+                            return (
+                              <tr key={e.id} className="hover:bg-slate-50/50 transition">
+                                <td className="py-4 px-6">
+                                  <div className="flex items-center gap-3">
+                                    <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-600 font-bold flex items-center justify-center shrink-0 text-xs">
+                                      {e.name.charAt(0).toUpperCase()}
+                                    </div>
+                                    <div>
+                                      <p className="font-semibold text-slate-800">{e.name}</p>
+                                      <p className="text-xs text-slate-500">{e.email || '—'}</p>
+                                    </div>
+                                  </div>
+                                </td>
+                                <td className="py-4 px-6 text-slate-600 font-medium">{e.department}</td>
+                                <td className="py-4 px-6 font-semibold text-slate-700">{totalHrs}h</td>
+                                <td className="py-4 px-6 text-emerald-600 font-medium">{activeHrs}h</td>
+                                <td className="py-4 px-6 text-amber-500 font-medium">{idleHrs}h</td>
+                                <td className="py-4 px-6">
+                                  <span className={`font-bold ${getProductivityColor(e.productivity)}`}>
+                                    {Math.round(e.productivity)}%
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+
+              {reportInnerTab === 'chart' && (
+                <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                  {/* Legend */}
+                  <div className="flex flex-wrap items-center gap-4 px-6 py-3 border-b border-slate-100 bg-slate-50/60">
+                    {[
+                      { code: 'A', label: 'Absent', color: 'bg-red-400' },
+                      { code: 'HP', label: 'Half Present', color: 'bg-amber-400' },
+                      { code: 'P', label: 'Present', color: 'bg-emerald-500' },
+                      { code: 'L', label: 'Leave', color: 'bg-blue-300' },
+                      { code: 'H', label: 'Holiday', color: 'bg-purple-400' },
+                      { code: 'NW', label: 'Week Off', color: 'bg-slate-300' },
+                    ].map(l => (
+                      <span key={l.code} className="flex items-center gap-1.5 text-xs text-slate-600 font-medium">
+                        <span className={`w-2.5 h-2.5 rounded-full ${l.color}`} />
+                        {l.code} – {l.label}
+                      </span>
+                    ))}
+                  </div>
+
+                  {loadingAttendance ? (
+                    <div className="flex items-center justify-center py-20 text-slate-400">
+                      <RefreshCw className="w-5 h-5 animate-spin mr-2" />
+                      Loading attendance data...
+                    </div>
+                  ) : attendanceRows.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-20 text-slate-400">
+                      <BarChart2 className="w-10 h-10 mb-3 opacity-40" />
+                      <p className="font-medium text-slate-500">Click "📊 Chart" tab to load attendance data</p>
+                      <p className="text-xs mt-1">Select a date range above and switch to this tab</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs border-collapse min-w-[900px]">
+                        <thead className="bg-slate-50 border-b border-slate-200">
+                          <tr className="text-slate-500 font-semibold uppercase tracking-wider">
+                            <th className="py-3 px-4 sticky left-0 bg-slate-50 z-10 min-w-[80px]">ID</th>
+                            <th className="py-3 px-4 sticky left-[80px] bg-slate-50 z-10 min-w-[160px]">User</th>
+                            <th className="py-3 px-4 text-center min-w-[90px]">Expected Days</th>
+                            <th className="py-3 px-4 text-center min-w-[90px]">Present Days</th>
+                            <th className="py-3 px-4 text-center min-w-[90px]">Absent Days</th>
+                            <th className="py-3 px-4 text-center min-w-[70px]">Leaves</th>
+                            <th className="py-3 px-4 text-center min-w-[90px]">Week Off / Holidays</th>
+                            {attendanceDates.map(date => {
+                              const d = new Date(date);
+                              const day = d.getDate();
+                              const dow = ['Su','Mo','Tu','We','Th','Fr','Sa'][d.getDay()];
+                              return (
+                                <th key={date} className="py-2 px-1 text-center min-w-[38px] font-semibold">
+                                  <div className="text-slate-700">{day}</div>
+                                  <div className="text-slate-400 font-normal">{dow}</div>
+                                </th>
+                              );
+                            })}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {attendanceRows
+                            .filter(r => !reportSearch || r.employee_name.toLowerCase().includes(reportSearch.toLowerCase()) || r.employee_code.toLowerCase().includes(reportSearch.toLowerCase()))
+                            .map(row => {
+                              const weekOffCount = row.days.filter(d => d.status === 'NW' || d.status === 'H').length;
+                              return (
+                                <tr key={row.employee_id} className="hover:bg-slate-50/60 transition">
+                                  <td className="py-3 px-4 sticky left-0 bg-white font-medium text-slate-600 z-10">{row.employee_code}</td>
+                                  <td className="py-3 px-4 sticky left-[80px] bg-white font-semibold text-slate-800 z-10 whitespace-nowrap">{row.employee_name}</td>
+                                  <td className="py-3 px-4 text-center text-slate-700 font-semibold">{row.expectedDays}</td>
+                                  <td className="py-3 px-4 text-center text-emerald-600 font-semibold">{row.presentDays}</td>
+                                  <td className="py-3 px-4 text-center text-red-500 font-semibold">{row.absentDays}</td>
+                                  <td className="py-3 px-4 text-center text-slate-500">0</td>
+                                  <td className="py-3 px-4 text-center text-slate-500">{weekOffCount}</td>
+                                  {row.days.map(day => {
+                                    const statusStyles: Record<string, string> = {
+                                      P:  'bg-emerald-500 text-white',
+                                      HP: 'bg-amber-400 text-white',
+                                      A:  'bg-red-400 text-white',
+                                      L:  'bg-blue-300 text-white',
+                                      H:  'bg-purple-400 text-white',
+                                      NW: 'bg-slate-200 text-slate-500',
+                                    };
+                                    return (
+                                      <td key={day.date} className="py-2 px-1 text-center">
+                                        <span className={`inline-flex items-center justify-center w-7 h-7 rounded text-[10px] font-bold ${statusStyles[day.status] || 'bg-slate-100 text-slate-400'}`}>
+                                          {day.status}
+                                        </span>
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              );
+                            })}
+                          {/* Totals Row */}
+                          {attendanceRows.length > 0 && (
+                            <tr className="bg-slate-50 font-bold border-t-2 border-slate-200">
+                              <td className="py-3 px-4 sticky left-0 bg-slate-50 z-10" colSpan={2}>Total days</td>
+                              <td className="py-3 px-4 text-center text-slate-700">
+                                {attendanceRows[0]?.expectedDays ?? 0}
+                              </td>
+                              <td className="py-3 px-4 text-center text-emerald-600">
+                                {Math.round(attendanceRows.reduce((s, r) => s + r.presentDays, 0) / Math.max(attendanceRows.length, 1))}
+                              </td>
+                              <td className="py-3 px-4 text-center text-red-500">
+                                {Math.round(attendanceRows.reduce((s, r) => s + r.absentDays, 0) / Math.max(attendanceRows.length, 1))}
+                              </td>
+                              <td className="py-3 px-4 text-center text-slate-500">0</td>
+                              <td className="py-3 px-4 text-center text-slate-500">
+                                {attendanceDates.filter(d => new Date(d).getDay() === 0).length}
+                              </td>
+                              {attendanceDates.map(date => (
+                                <td key={date} className="py-2 px-1 text-center text-slate-400 text-[10px]">
+                                  {attendanceRows.filter(r => r.days.find(d => d.date === date && d.status === 'P')).length}
+                                </td>
+                              ))}
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* =================== DATA EXPORTS TAB =================== */}
+              {reportInnerTab === 'exports' && (
+                <div className="space-y-6">
+                  {/* Manual Export Controls */}
+                  <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+                    <h3 className="text-base font-bold text-slate-800 mb-1">Manual Export</h3>
+                    <p className="text-xs text-slate-500 mb-4">Trigger an on-demand export for a specific date. The backend service must be running for this to work.</p>
+                    <div className="flex flex-wrap items-end gap-3 mb-4">
+                      <div className="flex-1 min-w-[200px] max-w-sm">
+                        <label className="block text-xs font-semibold text-slate-600 mb-1">Backend Service URL</label>
+                        <input
+                          type="text"
+                          value={manualBackendUrl}
+                          onChange={e => setManualBackendUrl(e.target.value)}
+                          placeholder="http://localhost:3001"
+                          className="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm text-slate-700 focus:border-blue-500 outline-none"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-end gap-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-600 mb-1">Export Date</label>
+                        <input
+                          type="date"
+                          value={manualExportDate}
+                          onChange={e => setManualExportDate(e.target.value)}
+                          className="px-3 py-2 rounded-lg border border-slate-200 text-sm text-slate-700 focus:border-blue-500 outline-none"
+                        />
+                      </div>
+                      <button
+                        onClick={() => triggerManualExport(manualExportDate)}
+                        disabled={triggeringExport}
+                        className="flex items-center gap-2 px-4 py-2 bg-teal-600 text-white text-sm font-semibold rounded-lg hover:bg-teal-700 disabled:opacity-50 transition shadow-sm"
+                      >
+                        {triggeringExport ? (
+                          <><RefreshCw className="w-4 h-4 animate-spin" /> Exporting...</>
+                        ) : (
+                          <><Download className="w-4 h-4" /> Generate & Archive Report</>
+                        )}
+                      </button>
+                      <button
+                        onClick={() => {
+                          const d = new Date(); d.setDate(d.getDate()-1);
+                          triggerManualExport(d.toISOString().slice(0,10));
+                        }}
+                        disabled={triggeringExport}
+                        className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 disabled:opacity-50 transition shadow-sm"
+                      >
+                        <Download className="w-4 h-4" /> Export Yesterday
+                      </button>
+                    </div>
+                    {exportMsg && (
+                      <div className={`mt-3 px-4 py-2.5 rounded-lg text-sm font-medium ${
+                        exportMsg.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-red-50 text-red-700 border border-red-200'
+                      }`}>
+                        {exportMsg.text}
+                      </div>
                     )}
-                  </tbody>
-                </table>
-              </div>
+                  </div>
+
+                  {/* Export Status Dashboard */}
+                  <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                    <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+                      <div>
+                        <h3 className="text-base font-bold text-slate-800">Export Status Dashboard</h3>
+                        <p className="text-xs text-slate-500 mt-0.5">Last 30 archive jobs</p>
+                      </div>
+                      <button
+                        onClick={fetchArchives}
+                        disabled={archivesLoading}
+                        className="flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-50 transition"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${archivesLoading ? 'animate-spin' : ''}`} />
+                        Refresh
+                      </button>
+                    </div>
+
+                    {archivesLoading ? (
+                      <div className="flex items-center justify-center py-16 text-slate-400">
+                        <RefreshCw className="w-5 h-5 animate-spin mr-2" /> Loading archives...
+                      </div>
+                    ) : archivesData.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+                        <Download className="w-10 h-10 mb-3 opacity-30" />
+                        <p className="font-medium text-slate-500">No export archives found</p>
+                        <p className="text-xs mt-1">Run the first export using the controls above</p>
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-sm">
+                          <thead className="bg-slate-50 border-b border-slate-100">
+                            <tr className="text-xs text-slate-500 font-semibold uppercase tracking-wider">
+                              <th className="py-3 px-5">Export Date</th>
+                              <th className="py-3 px-5">Status</th>
+                              <th className="py-3 px-5">Archive Size</th>
+                              <th className="py-3 px-5">Records Exported</th>
+                              <th className="py-3 px-5">Records Deleted</th>
+                              <th className="py-3 px-5">Generated At</th>
+                              <th className="py-3 px-5">Download</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-50">
+                            {archivesData.map(archive => (
+                              <tr key={archive.id} className="hover:bg-slate-50/60 transition">
+                                <td className="py-3 px-5 font-semibold text-slate-800">{archive.export_date}</td>
+                                <td className="py-3 px-5">
+                                  <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold ${
+                                    archive.status === 'SUCCESS'
+                                      ? 'bg-emerald-100 text-emerald-700'
+                                      : 'bg-red-100 text-red-700'
+                                  }`}>
+                                    <span className={`w-1.5 h-1.5 rounded-full ${
+                                      archive.status === 'SUCCESS' ? 'bg-emerald-500' : 'bg-red-500'
+                                    }`} />
+                                    {archive.status}
+                                    {archive.status === 'FAILED' && archive.error_message && (
+                                      <span className="ml-1 text-red-500 font-normal" title={archive.error_message}>⚠</span>
+                                    )}
+                                  </span>
+                                </td>
+                                <td className="py-3 px-5 text-slate-600">
+                                  {archive.archive_size_bytes > 0
+                                    ? `${(archive.archive_size_bytes / 1024).toFixed(1)} KB`
+                                    : '—'}
+                                </td>
+                                <td className="py-3 px-5 text-slate-600">{archive.records_exported?.toLocaleString() || '0'}</td>
+                                <td className="py-3 px-5 text-red-500 font-medium">{archive.records_deleted?.toLocaleString() || '0'}</td>
+                                <td className="py-3 px-5 text-slate-500 text-xs">
+                                  {new Date(archive.created_at).toLocaleString()}
+                                </td>
+                                <td className="py-3 px-5">
+                                  {archive.archive_url ? (
+                                    <a
+                                      href={archive.archive_url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-600 text-xs font-semibold rounded-lg hover:bg-blue-100 transition"
+                                    >
+                                      <Download className="w-3 h-3" /> Download ZIP
+                                    </a>
+                                  ) : (
+                                    <span className="text-slate-400 text-xs">Not available</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Retention Policy Info */}
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-5">
+                    <h4 className="text-sm font-bold text-amber-800 mb-2">📋 Data Retention Policy</h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-amber-700">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-amber-500 flex-shrink-0" />
+                        <span><strong>Activity Logs, Idle Logs, Alerts:</strong> Deleted after 48 hours (post-export)</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-amber-500 flex-shrink-0" />
+                        <span><strong>Screenshots:</strong> Deleted after 7 days (post-export)</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 flex-shrink-0" />
+                        <span><strong>Daily/Monthly Summaries:</strong> Retained permanently</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 flex-shrink-0" />
+                        <span><strong>ZIP Archives (Supabase Storage):</strong> Retained permanently</span>
+                      </div>
+                      <div className="flex items-center gap-2 md:col-span-2">
+                        <span className="w-2 h-2 rounded-full bg-red-500 flex-shrink-0" />
+                        <span><strong>Safety:</strong> Raw data is NEVER deleted unless Excel + ZIP + Upload + DB record all succeed</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
+
 
           {sidebarActive === 'analytics' && (() => {
             const emp = selectedAnalyticsEmployee === 'all' ? null : employeesList.find(e => e.id === selectedAnalyticsEmployee);
@@ -2193,12 +3004,295 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
           })()}
 
           {sidebarActive === 'field_tracking' && (
-            <div className="max-w-4xl mx-auto p-6 bg-white border border-slate-200 rounded-xl shadow-sm space-y-4 text-center">
-              <MapPin className="w-12 h-12 text-emerald-500 mx-auto opacity-40" />
-              <h2 className="text-lg font-bold text-slate-900">GPS Field Tracking</h2>
-              <p className="text-sm text-slate-500 max-w-sm mx-auto">Monitor field worker check-ins, transit times, and client-site geo-fences.</p>
-              <div className="p-8 bg-slate-50 border border-slate-100 rounded-lg text-slate-500 text-xs">
-                No active mobile agents reported. Waiting for GPS link.
+            <MonitoringDashboard defaultTab="locations" hideTabs={true} />
+          )}
+
+          {sidebarActive === 'access_control' && (
+            <div className="space-y-6">
+              {/* Header section */}
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                <div>
+                  <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Access Control</h1>
+                  <p className="text-sm text-slate-500 mt-1">
+                    Manage and verify TimeGuard security agent installations and last active sessions across all personnel laptops.
+                  </p>
+                </div>
+              </div>
+
+              {/* Stats Grid */}
+              {(() => {
+                const total = employeesList.length;
+                const installed = employeesList.filter((emp) => emp.agentInstalled).length;
+                const pending = total - installed;
+                const installedPercent = total > 0 ? Math.round((installed / total) * 100) : 0;
+                const pendingPercent = total > 0 ? Math.round((pending / total) * 100) : 0;
+
+                return (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    {/* Card 1: Total */}
+                    <div className="bg-white border border-slate-200/80 rounded-xl p-5 shadow-sm flex items-center gap-4">
+                      <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center text-blue-600">
+                        <Users className="w-6 h-6" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Total Directory</p>
+                        <h3 className="text-2xl font-bold text-slate-800 mt-0.5">{total}</h3>
+                        <p className="text-xs text-slate-500 mt-0.5">Registered employees</p>
+                      </div>
+                    </div>
+
+                    {/* Card 2: Installed */}
+                    <div className="bg-white border border-slate-200/80 rounded-xl p-5 shadow-sm flex items-center gap-4">
+                      <div className="w-12 h-12 rounded-xl bg-emerald-50 flex items-center justify-center text-emerald-600">
+                        <Shield className="w-6 h-6" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Agent Installed</p>
+                        <h3 className="text-2xl font-bold text-emerald-600 mt-0.5">
+                          {installed} <span className="text-xs font-normal text-slate-400">({installedPercent}%)</span>
+                        </h3>
+                        <p className="text-xs text-slate-500 mt-0.5">Laptops actively monitored</p>
+                      </div>
+                    </div>
+
+                    {/* Card 3: Pending */}
+                    <div className="bg-white border border-slate-200/80 rounded-xl p-5 shadow-sm flex items-center gap-4">
+                      <div className="w-12 h-12 rounded-xl bg-slate-50 flex items-center justify-center text-slate-500">
+                        <Clock className="w-6 h-6" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Pending Setup</p>
+                        <h3 className="text-2xl font-bold text-slate-700 mt-0.5">
+                          {pending} <span className="text-xs font-normal text-slate-400">({pendingPercent}%)</span>
+                        </h3>
+                        <p className="text-xs text-slate-500 mt-0.5">Awaiting agent installation</p>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Timesheet Configuration Box */}
+              <div className="bg-white border border-slate-200 rounded-xl shadow-sm p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h2 className="text-base font-bold text-slate-800">Timesheet Lock Enforcement Settings</h2>
+                    <p className="text-xs text-slate-500">Configure when employees receive warnings and get locked out.</p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      className="sr-only peer" 
+                      checked={enableLockEnforcement}
+                      onChange={(e) => setEnableLockEnforcement(e.target.checked)}
+                    />
+                    <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                    <span className="ml-3 text-sm font-medium text-slate-700">Enable Enforcement</span>
+                  </label>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">Check Time (HH:MM)</label>
+                    <input 
+                      type="time" 
+                      value={tsCheckTime}
+                      onChange={e => setTsCheckTime(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">Warning Time (HH:MM)</label>
+                    <input 
+                      type="time" 
+                      value={tsWarnTime}
+                      onChange={e => setTsWarnTime(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">Lock Time (HH:MM)</label>
+                    <input 
+                      type="time" 
+                      value={tsLockTime}
+                      onChange={e => setTsLockTime(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                    />
+                  </div>
+                </div>
+                <div className="flex justify-end">
+                  <button 
+                    onClick={handleSaveTsConfig}
+                    disabled={isSavingTsConfig}
+                    className="flex items-center gap-2 bg-slate-900 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-slate-800 disabled:opacity-50"
+                  >
+                    {isSavingTsConfig ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Settings className="w-4 h-4" />}
+                    Save Config
+                  </button>
+                </div>
+              </div>
+
+              {/* Table / List Container */}
+              <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+                {/* Table Header Filter controls */}
+                <div className="p-5 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="relative flex-1 max-w-md">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      placeholder="Search by name, department, or role..."
+                      value={accessControlSearch}
+                      onChange={(e) => setAccessControlSearch(e.target.value)}
+                      className="w-full pl-9 pr-4 py-2 rounded-lg bg-slate-50 border border-transparent focus:bg-white focus:border-slate-200 text-sm outline-none transition placeholder:text-slate-400"
+                    />
+                  </div>
+                  
+                  <div className="flex items-center gap-2">
+                    <label className="text-sm text-slate-600 font-medium whitespace-nowrap">Timesheet Date:</label>
+                    <div className="relative">
+                      <Calendar className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="date"
+                        value={accessControlDate}
+                        onChange={(e) => setAccessControlDate(e.target.value)}
+                        className="pl-9 pr-4 py-2 rounded-lg bg-slate-50 border border-slate-200 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Table View */}
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-100">
+                        <th className="px-6 py-3.5 text-xs font-semibold text-slate-500 uppercase tracking-wider">Employee</th>
+                        <th className="px-6 py-3.5 text-xs font-semibold text-slate-500 uppercase tracking-wider">Department</th>
+                        <th className="px-6 py-3.5 text-xs font-semibold text-slate-500 uppercase tracking-wider">Role</th>
+                        <th className="px-6 py-3.5 text-xs font-semibold text-slate-500 uppercase tracking-wider">Agent Status</th>
+                        <th className="px-6 py-3.5 text-xs font-semibold text-slate-500 uppercase tracking-wider">Timesheet ({accessControlDate ? accessControlDate : 'N/A'})</th>
+                        <th className="px-6 py-3.5 text-xs font-semibold text-slate-500 uppercase tracking-wider">Last Lock Reason</th>
+                        <th className="px-6 py-3.5 text-xs font-semibold text-slate-500 uppercase tracking-wider">Last Active Session</th>
+                        <th className="px-6 py-3.5 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(() => {
+                        const filtered = employeesList.filter((emp) => {
+                          const term = accessControlSearch.toLowerCase();
+                          return (
+                            emp.name.toLowerCase().includes(term) ||
+                            emp.department.toLowerCase().includes(term) ||
+                            (emp.role || '').toLowerCase().includes(term)
+                          );
+                        });
+
+                        if (filtered.length === 0) {
+                          return (
+                            <tr>
+                              <td colSpan={7} className="text-center py-12 text-slate-400 text-sm">
+                                <Shield className="w-8 h-8 mx-auto mb-2 opacity-30 text-slate-500" />
+                                No matching employees found.
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        return filtered.map((emp) => (
+                          <tr key={emp.id} className="hover:bg-slate-50/50 transition">
+                            <td className="px-6 py-4 flex items-center gap-3">
+                              <div className="w-9 h-9 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center font-semibold text-blue-600 text-sm shadow-sm shrink-0">
+                                {emp.name.split(' ').map((n) => n[0]).join('').slice(0, 2).toUpperCase()}
+                              </div>
+                              <div>
+                                <h4 className="text-sm font-semibold text-slate-800">{emp.name}</h4>
+                                <p className="text-xs text-slate-400">{emp.email || 'No email registered'}</p>
+                              </div>
+                            </td>
+                            <td className="px-6 py-4 text-sm text-slate-600 font-medium">{emp.department}</td>
+                            <td className="px-6 py-4 text-sm text-slate-500 capitalize">{emp.role || 'employee'}</td>
+                            <td className="px-6 py-4">
+                              {emp.agentInstalled ? (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/50">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                  Installed
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-600 border border-slate-200/50">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+                                  Not Installed
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4">
+                              {emp.timesheetStatus ? (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/50">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                  Submitted
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-50 text-rose-700 border border-rose-200/50">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                                  Pending
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4 text-sm text-slate-600">
+                              {emp.lastLockReason ? (
+                                <span className="inline-flex items-center gap-2 px-2.5 py-1 rounded-lg bg-slate-50 text-slate-700 border border-slate-200/50">
+                                  {emp.lastLockReason}
+                                </span>
+                              ) : (
+                                <span className="text-slate-400 italic">No reason logged</span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4 text-sm text-slate-500">
+                              {emp.lastSessionDate && emp.lastSessionDate !== 'Never' ? (
+                                <div className="flex items-center gap-2">
+                                  <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                                  <span>{emp.lastSessionDate}</span>
+                                </div>
+                              ) : (
+                                <span className="text-slate-400 italic">Never connected</span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4 text-right">
+                              <div className="flex items-center justify-end gap-2">
+                                <button
+                                  onClick={() => handleViewCompliance(emp)}
+                                  disabled={isFetchingCompliance === emp.id}
+                                  className="text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg transition disabled:opacity-50 inline-flex items-center gap-1.5"
+                                >
+                                  {isFetchingCompliance === emp.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Eye className="w-3 h-3" />}
+                                  View Compliance
+                                </button>
+                                {emp.timesheetStatus === false && (
+                                  <button
+                                    onClick={() => handleReleaseUser(emp)}
+                                    disabled={releasingUserId === emp.id}
+                                    className="text-xs font-semibold text-white bg-amber-500 hover:bg-amber-600 px-3 py-1.5 rounded-lg transition disabled:opacity-50 inline-flex items-center gap-1.5"
+                                  >
+                                    {releasingUserId === emp.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Shield className="w-3 h-3" />}
+                                    Release Lock
+                                  </button>
+                                )}
+                                {emp.timesheetStatus === true && (
+                                  <button
+                                    onClick={() => handleLockUser(emp)}
+                                    disabled={releasingUserId === emp.id}
+                                    className="text-xs font-semibold text-white bg-red-500 hover:bg-red-600 px-3 py-1.5 rounded-lg transition disabled:opacity-50 inline-flex items-center gap-1.5"
+                                  >
+                                    {releasingUserId === emp.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Shield className="w-3 h-3" />}
+                                    Lock Now
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ));
+                      })()}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}
@@ -2224,6 +3318,132 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
           )}
 
         </main>
+
+        {/* Compliance Details Modal */}
+        {isComplianceModalOpen && selectedComplianceDetails && (
+          <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+            <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+              <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50 sticky top-0 z-10">
+                <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                  <Shield className="w-5 h-5 text-blue-500" />
+                  Compliance Details
+                </h3>
+                <button
+                  onClick={() => setIsComplianceModalOpen(false)}
+                  className="text-slate-400 hover:text-slate-600 transition"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="p-6 overflow-y-auto space-y-6 bg-white flex-1">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+                  {/* Basic Info */}
+                  <div className="col-span-1 md:col-span-2 pb-2 border-b border-slate-100">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Employee Information</h4>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <p className="text-xs text-slate-500 font-semibold mb-1">Employee Name</p>
+                        <p className="text-sm text-slate-800 font-medium">{selectedComplianceDetails.employeeName}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-500 font-semibold mb-1">Employee Code</p>
+                        <p className="text-sm text-slate-800 font-medium">{selectedComplianceDetails.employeeCode}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Timesheet & Date */}
+                  <div className="col-span-1 md:col-span-2 pb-2 border-b border-slate-100">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Timesheet Status</h4>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <p className="text-xs text-slate-500 font-semibold mb-1">Date Checked</p>
+                        <p className="text-sm text-slate-800 font-medium">{selectedComplianceDetails.dateChecked}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-500 font-semibold mb-1">Timesheet Submitted</p>
+                        <p className={`text-sm font-semibold ${selectedComplianceDetails.timesheetSubmitted ? 'text-emerald-600' : 'text-rose-600'}`}>
+                          {selectedComplianceDetails.timesheetSubmitted ? 'Yes' : 'No'}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Leave Details */}
+                  <div className="col-span-1 md:col-span-2 pb-2 border-b border-slate-100">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Leave / Exemption Status</h4>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <p className="text-xs text-slate-500 font-semibold mb-1">Leave Status</p>
+                        <p className={`text-sm font-semibold ${selectedComplianceDetails.leaveStatus === 'Approved' ? 'text-emerald-600' : 'text-slate-600'}`}>
+                          {selectedComplianceDetails.leaveStatus}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-500 font-semibold mb-1">Leave Type</p>
+                        <p className="text-sm text-slate-800 font-medium">{selectedComplianceDetails.leaveType}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-500 font-semibold mb-1">Leave Start Date</p>
+                        <p className="text-sm text-slate-800 font-medium">{selectedComplianceDetails.startDate}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-500 font-semibold mb-1">Leave End Date</p>
+                        <p className="text-sm text-slate-800 font-medium">{selectedComplianceDetails.endDate}</p>
+                      </div>
+                      <div className="col-span-2">
+                        <p className="text-xs text-slate-500 font-semibold mb-1">Exemption Reason</p>
+                        <p className="text-sm text-slate-800 font-medium bg-slate-50 p-2 rounded-lg border border-slate-100">{selectedComplianceDetails.exemptionReason}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Lock/Warning Actions */}
+                  <div className="col-span-1 md:col-span-2">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Action History</h4>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <p className="text-xs text-slate-500 font-semibold mb-1">Warning Status</p>
+                        <p className="text-sm text-slate-800 font-medium">
+                          {selectedComplianceDetails.warningStatus}
+                          {selectedComplianceDetails.lastWarningTime !== '-' && <span className="text-slate-500 text-xs ml-1">({selectedComplianceDetails.lastWarningTime})</span>}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-500 font-semibold mb-1">Lock Status</p>
+                        <p className="text-sm text-slate-800 font-medium">
+                          {selectedComplianceDetails.lockStatus}
+                          {selectedComplianceDetails.lastLockTime !== '-' && <span className="text-slate-500 text-xs ml-1">({selectedComplianceDetails.lastLockTime})</span>}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-500 font-semibold mb-1">Manual Lock Status</p>
+                        <p className={`text-sm font-medium ${selectedComplianceDetails.manualLockStatus === 'Active' ? 'text-rose-600' : 'text-slate-800'}`}>
+                          {selectedComplianceDetails.manualLockStatus}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-slate-500 font-semibold mb-1">Manual Unlock Status</p>
+                        <p className={`text-sm font-medium ${selectedComplianceDetails.manualUnlockStatus === 'Active' ? 'text-emerald-600' : 'text-slate-800'}`}>
+                          {selectedComplianceDetails.manualUnlockStatus}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                </div>
+              </div>
+              <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end sticky bottom-0 z-10">
+                <button
+                  onClick={() => setIsComplianceModalOpen(false)}
+                  className="px-5 py-2.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-sm font-semibold rounded-lg transition shadow-sm"
+                >
+                  Close Details
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
     </div>

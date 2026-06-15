@@ -1,25 +1,15 @@
-import { Minimize2, Maximize2, X, Lock } from 'lucide-react';
+import { Maximize2, X, Lock } from 'lucide-react';
 import { useState } from 'react';
 
 interface WindowControlsProps {
-  disabledMinimize?: boolean;
   disabledClose?: boolean;
 }
 
-export default function WindowControls({ disabledMinimize = false, disabledClose = false }: WindowControlsProps) {
+export default function WindowControls({ disabledClose = false }: WindowControlsProps) {
   const [isMaximized, setIsMaximized] = useState(false);
   const [showLockIndicator, setShowLockIndicator] = useState(false);
 
   const api = typeof window !== 'undefined' ? (window as any).electronAPI : undefined;
-
-  const handleMinimize = async () => {
-    if (disabledMinimize) {
-      setShowLockIndicator(true);
-      setTimeout(() => setShowLockIndicator(false), 2000);
-      return;
-    }
-    await api?.minimizeWindow?.();
-  };
 
   const handleToggleMaximize = async () => {
     await api?.toggleMaximizeWindow?.();
@@ -35,8 +25,6 @@ export default function WindowControls({ disabledMinimize = false, disabledClose
     await api?.closeWindow?.();
   };
 
-  const isLocked = disabledMinimize || disabledClose;
-
   return (
     <div className="flex items-center gap-2">
       {showLockIndicator && (
@@ -45,16 +33,6 @@ export default function WindowControls({ disabledMinimize = false, disabledClose
           Window locked
         </div>
       )}
-      <button
-        onClick={handleMinimize}
-        disabled={disabledMinimize}
-        className={`w-8 h-8 rounded-full ${disabledMinimize 
-          ? 'bg-red-100 text-red-400 cursor-not-allowed' 
-          : 'bg-gray-100 hover:bg-gray-200 text-gray-600'} flex items-center justify-center transition`}
-        title={disabledMinimize ? "Minimize disabled - complete plan flow to unlock" : "Minimize"}
-      >
-        <Minimize2 className="w-4 h-4" />
-      </button>
       <button
         onClick={handleToggleMaximize}
         className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-600 flex items-center justify-center transition"

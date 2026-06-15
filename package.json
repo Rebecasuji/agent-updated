@@ -11,8 +11,9 @@
     "dev": "vite",
     "dev:electron": "electron .",
     "build": "vite build && npm run build:electron",
-    "build:electron": "tsc --project tsconfig.electron.json && node -e \"const fs = require('fs'); fs.copyFileSync('electron/preload.cjs', 'dist/electron/preload.cjs');\"",
-    "build:windows": "npm run build && electron-builder --win --config.directories.output=release",
+    "build:electron": "tsc --project tsconfig.electron.json && node -e \"const fs = require('fs'); const path = require('path'); const src = path.join('dist','electron','src'); const dest = path.join('dist','src'); if (fs.existsSync(src)) { fs.rmSync(dest, { recursive: true, force: true }); const copyRecursive = (srcDir, destDir) => { fs.mkdirSync(destDir, { recursive: true }); for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) { const srcPath = path.join(srcDir, entry.name); const destPath = path.join(destDir, entry.name); if (entry.isDirectory()) copyRecursive(srcPath, destPath); else fs.copyFileSync(srcPath, destPath); } }; copyRecursive(src, dest); } fs.mkdirSync(path.join('dist','electron'), { recursive: true }); fs.copyFileSync('electron/preload.cjs', 'dist/electron/preload.cjs');\"",
+    "build:windows": "npm run build && npm run copy:env && electron-builder --win --config.directories.output=release",
+    "copy:env": "node -e \"const fs = require('fs'); const path = require('path'); const envFile = '.env'; const destDir = path.join('dist'); if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true }); if (fs.existsSync(envFile)) { fs.copyFileSync(envFile, path.join(destDir, envFile)); console.log('✓ Copied .env to dist/'); } else { console.warn('⚠ .env file not found'); }\"",
     "build:msi": "npm run build && electron-builder --win msi --config.directories.output=release",
     "lint": "eslint .",
     "preview": "vite preview",
@@ -44,6 +45,7 @@
     "@types/electron": "^1.6.10",
     "@types/node": "^20.0.0",
     "@types/node-cron": "^3.0.11",
+    "@types/pg": "^8.20.0",
     "@types/react": "^18.3.5",
     "@types/react-dom": "^18.3.0",
     "@types/screenshot-desktop": "^1.15.0",
@@ -70,15 +72,29 @@
     "files": [
       "dist/app/**/*",
       "dist/electron/**/*",
+      "dist/src/**/*",
       "node_modules/**/*",
       "electron/**/*"
+    ],
+    "extraFiles": [
+      {
+        "from": "dist/.env",
+        "to": ".env",
+        "filter": ["**/*"]
+      }
     ],
     "win": {
       "target": [
         "nsis",
         "portable"
       ],
-      "icon": "assets/icon.ico"
+      "icon": "assets/icon.ico",
+      "extraFiles": [
+        {
+          "from": "dist/.env",
+          "to": ".env"
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,

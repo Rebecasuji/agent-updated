@@ -1,0 +1,44 @@
+{
+  "appId": "com.knockturn.agent",
+  "productName": "Knockturn Agent",
+  "directories": {
+    "buildResources": "public",
+    "output": "release/mac"
+  },
+  "files": [
+    "dist/**/*",
+    "node_modules/**/*",
+    "package.json"
+  ],
+  "mac": {
+    "target": [
+      "dmg",
+      "zip",
+      "dir"
+    ],
+    "category": "public.app-category.productivity",
+    "icon": "public/assets/icon.icns",
+    "entitlements": "mac/entitlements.mac.plist",
+    "entitlementsInherit": "mac/entitlements.mac.plist",
+    "gatekeeperAssess": false,
+    "hardenedRuntime": true,
+    "signingIdentity": null,
+    "type": "distribution"
+  },
+  "dmg": {
+    "contents": [
+      {
+        "x": 130,
+        "y": 220,
+        "type": "file"
+      },
+      {
+        "x": 438,
+        "y": 220,
+        "type": "link",
+        "path": "/Applications"
+      }
+    ]
+  },
+  "afterSign": "mac/notarize.js"
+}
