@@ -1,19 +1,17 @@
 import { createClient, PostgrestError, SupabaseClient } from '@supabase/supabase-js';
 
-const getEnvValue = (key: 'VITE_SUPABASE_URL' | 'VITE_SUPABASE_ANON_KEY'): string | undefined => {
-  if (typeof import.meta !== 'undefined' && typeof import.meta.env !== 'undefined') {
-    return import.meta.env[key] as string | undefined;
-  }
-
-  return process.env[key] as string | undefined;
-};
-
 const getSupabaseUrl = (): string => {
-  return getEnvValue('VITE_SUPABASE_URL') || process.env.SUPABASE_URL || '';
+  if (typeof import.meta !== 'undefined' && typeof import.meta.env !== 'undefined') {
+    if (import.meta.env.VITE_SUPABASE_URL) return import.meta.env.VITE_SUPABASE_URL;
+  }
+  return process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
 };
 
 const getSupabaseAnonKey = (): string => {
-  return getEnvValue('VITE_SUPABASE_ANON_KEY') || process.env.SUPABASE_ANON_KEY || '';
+  if (typeof import.meta !== 'undefined' && typeof import.meta.env !== 'undefined') {
+    if (import.meta.env.VITE_SUPABASE_ANON_KEY) return import.meta.env.VITE_SUPABASE_ANON_KEY;
+  }
+  return process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
 };
 
 let supabaseClient: SupabaseClient | null = null;

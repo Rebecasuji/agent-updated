@@ -12,9 +12,9 @@
     "dev:electron": "electron .",
     "build": "vite build && npm run build:electron",
     "build:electron": "tsc --project tsconfig.electron.json && node -e \"const fs = require('fs'); const path = require('path'); const src = path.join('dist','electron','src'); const dest = path.join('dist','src'); if (fs.existsSync(src)) { fs.rmSync(dest, { recursive: true, force: true }); const copyRecursive = (srcDir, destDir) => { fs.mkdirSync(destDir, { recursive: true }); for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) { const srcPath = path.join(srcDir, entry.name); const destPath = path.join(destDir, entry.name); if (entry.isDirectory()) copyRecursive(srcPath, destPath); else fs.copyFileSync(srcPath, destPath); } }; copyRecursive(src, dest); } fs.mkdirSync(path.join('dist','electron'), { recursive: true }); fs.copyFileSync('electron/preload.cjs', 'dist/electron/preload.cjs');\"",
-    "build:windows": "npm run build && npm run copy:env && electron-builder --win --config.directories.output=release",
+    "build:windows": "npm run build && npm run copy:env && electron-builder --win --config.directories.output=release_new",
     "copy:env": "node -e \"const fs = require('fs'); const path = require('path'); const envFile = '.env'; const destDir = path.join('dist'); if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true }); if (fs.existsSync(envFile)) { fs.copyFileSync(envFile, path.join(destDir, envFile)); console.log('✓ Copied .env to dist/'); } else { console.warn('⚠ .env file not found'); }\"",
-    "build:msi": "npm run build && electron-builder --win msi --config.directories.output=release",
+    "build:msi": "npm run build && electron-builder --win msi --config.directories.output=release_new",
     "lint": "eslint .",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
@@ -67,7 +67,7 @@
     "appId": "com.knockturn.employee-agent",
     "productName": "Knockturn Employee Agent",
     "directories": {
-      "output": "release"
+      "output": "release_new"
     },
     "files": [
       "dist/app/**/*",

@@ -100,6 +100,7 @@ interface EmployeeQuickView {
   lastSessionDate?: string;
   employee_code?: string;
   timesheetStatus?: boolean;
+  isOnLeave?: boolean;
   shift_start?: string;
   shift_end?: string;
 }
@@ -311,7 +312,7 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
   const [archivesData, setArchivesData] = React.useState<ReportArchive[]>([]);
   const [archivesLoading, setArchivesLoading] = React.useState(false);
   const [exportingDate, setExportingDate] = React.useState('');
-  const [manualBackendUrl, setManualBackendUrl] = React.useState('http://localhost:3001');
+  const [manualBackendUrl, setManualBackendUrl] = React.useState('http://82.25.109.136:5001');
   const [manualExportDate, setManualExportDate] = React.useState(() => {
     const d = new Date(); d.setDate(d.getDate() - 1); return d.toISOString().slice(0, 10);
   });
@@ -561,6 +562,7 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
           lastSessionDate,
           employee_code: employee.employee_code,
           timesheetStatus: true, // Will update below
+          isOnLeave: false, // Will update below
           shift_start: employee.shift_start,
           shift_end: employee.shift_end,
         };
@@ -582,6 +584,20 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
               }
             });
           }
+        }
+
+        // Fetch leave status for each employee for the evaluated date (previous working day)
+        if (eApi?.getComplianceDetails && accessControlDate) {
+          await Promise.all(
+            updatedEmployeeList.map(async (e) => {
+              try {
+                const details = await eApi.getComplianceDetails(e.employee_code || '', e.id, accessControlDate);
+                if (details?.leaveStatus === 'Approved') {
+                  e.isOnLeave = true;
+                }
+              } catch {}
+            })
+          );
         }
       } catch (err) {
         console.error('Failed to fetch batch timesheet status', err);
@@ -639,7 +655,7 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch Timesheet Status when accessControlDate changes
+  // Fetch Timesheet Status + Leave Status when accessControlDate changes
   useEffect(() => {
     const fetchTimesheetStatuses = async () => {
       try {
@@ -651,11 +667,31 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
           
           if (empCodes.length > 0) {
             const { results } = await eApi.checkTimesheetsSubmittedBatch(empCodes, accessControlDate);
+
+            // Also fetch leave status for the evaluated date (previous working day)
+            const leaveMap: Record<string, boolean> = {};
+            if (eApi?.getComplianceDetails && accessControlDate) {
+              await Promise.all(
+                employeesList.map(async (e) => {
+                  try {
+                    const details = await eApi.getComplianceDetails(e.employee_code || '', e.id, accessControlDate);
+                    if (details?.leaveStatus === 'Approved') {
+                      leaveMap[e.id] = true;
+                    }
+                  } catch {}
+                })
+              );
+            }
+
             setEmployeesList(prev => prev.map(e => {
+              const updated = { ...e };
               if (e.employee_code && typeof results[e.employee_code] !== 'undefined') {
-                return { ...e, timesheetStatus: results[e.employee_code] };
+                updated.timesheetStatus = results[e.employee_code];
               }
-              return e;
+              if (leaveMap[e.id]) {
+                updated.isOnLeave = true;
+              }
+              return updated;
             }));
           }
         }
@@ -2678,7 +2714,7 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
                           type="text"
                           value={manualBackendUrl}
                           onChange={e => setManualBackendUrl(e.target.value)}
-                          placeholder="http://localhost:3001"
+                          placeholder="http://82.25.109.136:5001"
                           className="w-full px-3 py-2 rounded-lg border border-slate-200 text-sm text-slate-700 focus:border-blue-500 outline-none"
                         />
                       </div>
@@ -3224,7 +3260,12 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
                               )}
                             </td>
                             <td className="px-6 py-4">
-                              {emp.timesheetStatus ? (
+                              {emp.isOnLeave ? (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200/50">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-blue-500" />
+                                  On Leave
+                                </span>
+                              ) : emp.timesheetStatus ? (
                                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/50">
                                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                                   Submitted
@@ -3265,7 +3306,7 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
                                   {isFetchingCompliance === emp.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Eye className="w-3 h-3" />}
                                   View Compliance
                                 </button>
-                                {emp.timesheetStatus === false && (
+                                {emp.timesheetStatus === false && !emp.isOnLeave && (
                                   <button
                                     onClick={() => handleReleaseUser(emp)}
                                     disabled={releasingUserId === emp.id}

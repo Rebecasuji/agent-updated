@@ -52,7 +52,16 @@ class ActivitySyncService {
   setEmployeeId(id: string) {
     this.employeeId = id;
     if (typeof window !== 'undefined') {
-      localStorage.setItem('employeeId', id);
+      if (id) {
+        localStorage.setItem('employeeId', id);
+      } else {
+        localStorage.removeItem('employeeId');
+      }
+      
+      const api = (window as any).electronAPI;
+      if (api?.setCurrentEmployee) {
+        api.setCurrentEmployee(id || null).catch(console.error);
+      }
     }
   }
 
@@ -169,6 +178,7 @@ class ActivitySyncService {
           duration_seconds: log.durationSeconds,
         })),
         screenshots: localScreenshots.map(s => ({
+          employee_id: s.employee_id,
           app_name: s.app_name,
           captured_at: s.captured_at,
           screenshot_data: s.screenshot_data,
@@ -238,9 +248,15 @@ class ActivitySyncService {
       }
       for (const scr of data.screenshots) {
         try {
+          const targetEmployeeId = scr.employee_id || data.employee_id;
+          if (!targetEmployeeId) {
+            console.warn(`[Sync] ✗ Skipping screenshot upload for ${scr.app_name}: No employee_id found.`);
+            continue;
+          }
+
           console.log(`[Sync] Uploading screenshot: app=${scr.app_name}, time=${scr.captured_at}, dataSize=${scr.screenshot_data ? Math.round(scr.screenshot_data.length / 1024) + 'KB' : 'missing'}`);
           const result = await createScreenshot({
-            employee_id: data.employee_id,
+            employee_id: targetEmployeeId,
             session_id: sessionId,
             screenshot_data: scr.screenshot_data,
             app_name: scr.app_name,

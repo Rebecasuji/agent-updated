@@ -422,6 +422,7 @@ export default function App() {
     setScreen('login');
     setShowWaterReminder(false);
     activitySyncService.stopSyncingData();
+    activitySyncService.setEmployeeId(''); // Clears currentEmployeeId from background service
 
     // Clear persisted session and hide floating timer
     const eApi = api();
@@ -429,6 +430,7 @@ export default function App() {
     await eApi?.hideFloatingTimer?.();
     await eApi?.stopTracking?.();
     await eApi?.initializeSessionCounters?.(0, 0, 0, 0); // Reset counters in Electron on logout
+    await eApi?.resetSessionCounters?.(); // Completely wipe in-memory logs and save to disk
   };
 
   // ── Render ─────────────────────────────────────────────────────────────────
