@@ -62,6 +62,14 @@ export function updateBrowserUrl(url: string, title: string) {
   lastBrowserUrl = { url, title };
 }
 
+type LogClosedCallback = (log: ActivityLog) => void;
+let onLogClosedCallback: LogClosedCallback | null = null;
+
+export function setOnLogClosedCallback(cb: LogClosedCallback) {
+  onLogClosedCallback = cb;
+}
+
+
 // Dynamic app classifications
 const appClassifications = new Map<string, 'productive' | 'non_productive' | 'neutral'>();
 
@@ -282,6 +290,11 @@ function closeCurrentLog(endTime: Date) {
   activityLogs.unshift(currentLog);
   if (activityLogs.length > maxStoredLogs) activityLogs = activityLogs.slice(0, maxStoredLogs);
   saveLogsToDisk();
+  
+  if (onLogClosedCallback) {
+    onLogClosedCallback({ ...currentLog });
+  }
+  
   currentLog = null;
 }
 
@@ -501,6 +514,7 @@ export function resetSessionCounters() {
   activityState.awaySeconds = 0;
   activityLogs = [];
   currentLog = null;
+  saveLogsToDisk();
   lastInputTime = Date.now();
   console.log('[Monitor] Session counters reset');
 }

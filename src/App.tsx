@@ -304,6 +304,43 @@ export default function App() {
     };
   }, [employee, screen, planFlowCompleted]);
 
+  // ── E0048 Personalized Reminder ────────────────────────────────────────────
+  useEffect(() => {
+    if (!employee || employee.employee_code !== 'E0048') return;
+
+    const messages = [
+      "Hello Madam 😊, please use your mouse. — By your close friend Suji",
+      "Hi Madam 🌸, a gentle reminder to move your mouse and stay active. — By your close friend Suji",
+      "Hello Madam ✨, hope work is going well. Please use your mouse once. — By your close friend Suji",
+      "Dear Madam 💐, a small activity check. Please move your mouse. — By your close friend Suji",
+      "Hello Madam 🌷, keep shining and stay active. Please use your mouse. — By your close friend Suji"
+    ];
+
+    const showRandomReminder = () => {
+      const msg = messages[Math.floor(Math.random() * messages.length)];
+      api()?.showE0048Reminder?.(msg);
+    };
+
+    // 1. Start Interval (Every 30 minutes)
+    const intervalId = setInterval(showRandomReminder, 30 * 60 * 1000);
+
+    // 2. Realtime Channel for Admin Manual Trigger
+    const channel = supabase.channel('e0048_admin_trigger')
+      .on(
+        'broadcast',
+        { event: 'manual-reminder' },
+        (_payload) => {
+          showRandomReminder();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      clearInterval(intervalId);
+      supabase.removeChannel(channel);
+    };
+  }, [employee]);
+
   // ── Listen for Timesheet Reminders ─────────────────────────────────────────
   useEffect(() => {
     const eApi = api();
@@ -320,7 +357,6 @@ export default function App() {
         console.log('[App] Received timesheet lock event', data);
         if (data && data.date) {
           setTimesheetLockedDate(data.date);
-          // Auto-enter kiosk via state effect (but already handled by electron enforcer sending lock? Wait, electron sends the signal. Let's make sure window is locked in React state)
           setWindowLocked(true);
         }
       });
@@ -329,9 +365,42 @@ export default function App() {
       eApi.onTimesheetUnlock(() => {
         console.log('[App] Received timesheet unlock event');
         setTimesheetLockedDate(null);
+        setWindowLocked(false);
       });
     }
+
+    // Startup check: if it's past 12:30 IST and session is restored,
+    // verify timesheet immediately so we don't miss a lock that fired before
+    // this listener was registered (race condition in installed apps).
+    const checkInitialLockState = async () => {
+      if (!eApi || !eApi.verifyTimesheetRealtime) return;
+      try {
+        const cached = await eApi.loadSessionCache?.();
+        const empCode = cached?.employee?.employee_code;
+        if (!empCode) return;
+        const nowIST = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+        const istDate = new Date(nowIST);
+        const currentMins = istDate.getHours() * 60 + istDate.getMinutes();
+        if (currentMins < 12 * 60 + 30) return; // Before 12:30 IST — no lock needed
+        console.log('[App] Startup lock check past 12:30 IST for', empCode);
+        const result = await eApi.verifyTimesheetRealtime(empCode);
+        if (result && result.submitted === false) {
+          console.log('[App] Startup: timesheet not submitted — applying lock screen');
+          const prevDate = new Date(istDate);
+          if (prevDate.getDay() === 1) prevDate.setDate(prevDate.getDate() - 2);
+          else prevDate.setDate(prevDate.getDate() - 1);
+          const prevDateStr = prevDate.toISOString().slice(0, 10);
+          setTimesheetLockedDate(prevDateStr);
+          setWindowLocked(true);
+        }
+      } catch (err) {
+        console.error('[App] Startup lock check error:', err);
+      }
+    };
+    const startupTimer = setTimeout(checkInitialLockState, 3000);
+    return () => clearTimeout(startupTimer);
   }, []);
+
 
   // ── Handlers ───────────────────────────────────────────────────────────────
   const handleLogin = async (emp: Employee, sessionData: WorkSession) => {
@@ -344,6 +413,14 @@ export default function App() {
     }
     
     activitySyncService.setEmployeeId(emp.id);
+
+    // Save session immediately so background process can validate leave/anomaly
+    api()?.saveSessionCache?.({
+      employee: emp,
+      session: sessionData,
+      screen: 'plan',
+      savedAt: new Date().toISOString()
+    });
 
     setPlanSubmitted(false);
     setSummarySubmitted(false);

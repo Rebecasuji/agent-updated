@@ -30,6 +30,14 @@ export default function PlanOfDay({
   const [portalOpened, setPortalOpened] = useState(false);
   const [punchError, setPunchError] = useState('');
   const [portalUrl, setPortalUrl] = useState(`https://timestrap.space/plan-for-day?employeeId=${employee.id}`);
+  const [devModeEnabled, setDevModeEnabled] = useState(false);
+
+  const toggleDevMode = async () => {
+    if (typeof window !== 'undefined' && (window as any).electronAPI?.invoke) {
+      const state = await (window as any).electronAPI.invoke('toggle-developer-mode');
+      setDevModeEnabled(state);
+    }
+  };
 
   useEffect(() => {
     if (portalOpened) return;
@@ -300,6 +308,14 @@ export default function PlanOfDay({
                 No
               </button>
             </div>
+            {(employee.employee_code === 'E0046' || employee.employee_code === 'E0048') && (
+              <button 
+                onClick={toggleDevMode}
+                className={`mt-4 text-[10px] uppercase font-bold px-2 py-1 rounded transition-colors ${devModeEnabled ? 'bg-amber-100 text-amber-700' : 'text-gray-300 hover:text-gray-400'}`}
+              >
+                {devModeEnabled ? 'Developer Mode Active' : 'Dev'}
+              </button>
+            )}
           </div>
         </div>
       </div>

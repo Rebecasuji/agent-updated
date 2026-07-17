@@ -46,6 +46,7 @@ import {
   Line
 } from 'recharts';
 import MonitoringDashboard from './MonitoringDashboard';
+import ToolUsageReports from './ToolUsageReports';
 import WindowControls from './WindowControls';
 import {
   fetchAllEmployees,
@@ -68,7 +69,8 @@ import {
   AppClassification as ClassificationType,
   fetchAppSettings,
   updateAppSetting,
-  logTimesheetLockEvent
+  logTimesheetLockEvent,
+  supabase
 } from '../lib/supabase';
 
 
@@ -112,7 +114,7 @@ interface AdminMonitoringScreenProps {
 const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout }) => {
   // Navigation State
   const [sidebarActive, setSidebarActive] = useState<
-    'dashboard' | 'employees' | 'monitoring' | 'reports' | 'analytics' | 'field_tracking' | 'access_control' | 'settings' | 'profile'
+    'dashboard' | 'employees' | 'monitoring' | 'reports' | 'analytics' | 'tool_usage' | 'field_tracking' | 'access_control' | 'settings' | 'profile'
   >('dashboard');
 
   // Inner Settings Tab State
@@ -1128,6 +1130,16 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
               Analytics
             </button>
             <button
+              onClick={() => setSidebarActive('tool_usage')}
+              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition ${sidebarActive === 'tool_usage'
+                ? 'bg-blue-50 text-blue-600'
+                : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'
+                }`}
+            >
+              <Activity className="w-4 h-4" />
+              Tool Usage
+            </button>
+            <button
               onClick={() => setSidebarActive('field_tracking')}
               className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition ${sidebarActive === 'field_tracking'
                 ? 'bg-blue-50 text-blue-600'
@@ -1669,7 +1681,7 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
                     <p className="text-slate-400 text-xs font-bold uppercase tracking-wider">Active Departments</p>
                     <p className="text-3xl font-extrabold text-purple-600 mt-2">{departmentStats.length}</p>
                   </div>
-                  <div className="w-12 h-12 rounded-xl bg-purple-50 flex items-center justify-center text-purple-500">
+                  <div className="w-12 h-12 rounded-xl bg-purple-50 flex items-center justify-center text-purple-600">
                     <Clock className="w-6 h-6" />
                   </div>
                 </div>
@@ -3039,6 +3051,10 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
             );
           })()}
 
+            {sidebarActive === 'tool_usage' && (
+              <ToolUsageReports />
+            )}
+
           {sidebarActive === 'field_tracking' && (
             <MonitoringDashboard defaultTab="locations" hideTabs={true} />
           )}
@@ -3052,6 +3068,31 @@ const AdminMonitoringScreen: React.FC<AdminMonitoringScreenProps> = ({ onLogout 
                   <p className="text-sm text-slate-500 mt-1">
                     Manage and verify TimeGuard security agent installations and last active sessions across all personnel laptops.
                   </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={async () => {
+                      try {
+                        const ch = supabase.channel('e0048_admin_trigger');
+                        ch.subscribe((status: string) => {
+                          if (status === 'SUBSCRIBED') {
+                            ch.send({
+                              type: 'broadcast',
+                              event: 'manual-reminder',
+                              payload: { timestamp: Date.now() }
+                            }).then(() => {
+                              setTimeout(() => supabase.removeChannel(ch), 2000);
+                            });
+                          }
+                        });
+                      } catch (err) {
+                        console.error('Failed to send E0048 reminder:', err);
+                      }
+                    }}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg shadow-sm transition inline-flex items-center gap-2"
+                  >
+                    📩 Send E0048 Reminder
+                  </button>
                 </div>
               </div>
 

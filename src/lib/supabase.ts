@@ -1123,3 +1123,106 @@ export async function fetchRecentTimesheetLockLogs(limit: number = 200): Promise
   return data || [];
 }
 
+export interface EmployeeToolUsage {
+  id: string;
+  employee_id: string;
+  employee_name: string;
+  employee_code: string;
+  tool_name: string;
+  file_name: string | null;
+  website: string | null;
+  start_time: string;
+  end_time: string | null;
+  total_duration_seconds: number;
+  active_duration_seconds: number;
+  date: string;
+}
+
+// Apps to exclude from tool usage report (system/noise processes)
+const EXCLUDED_APPS = [
+  'knockturn', 'electron', 'searchhost', 'runtimebroker', 'shellexperiencehost',
+  'startmenuexperiencehost', 'systemsettings', 'textinputhost', 'explorer',
+  'applicationframehost', 'unknown', 'lockapp', 'logonui', 'winlogon',
+  'taskmgr', 'msedgewebview', 'dllhost', 'ctfmon', 'sihost',
+];
+
+function isExcludedApp(appName: string): boolean {
+  if (!appName) return true;
+  const lower = appName.toLowerCase();
+  return EXCLUDED_APPS.some(ex => lower.includes(ex));
+}
+
+export async function getToolUsageByDate(
+  dateString: string,
+  employeeId?: string
+): Promise<EmployeeToolUsage[]> {
+  // IST date → UTC range
+  const startOfDayIST = new Date(dateString + 'T00:00:00+05:30').toISOString();
+  const endOfDayIST   = new Date(dateString + 'T23:59:59+05:30').toISOString();
+
+  // 1. Fetch all employees (for name/code lookup)
+  const { data: empData } = await supabase
+    .from('employees')
+    .select('id, employee_name, employee_code');
+
+  const empMap = new Map<string, { name: string; code: string }>();
+  (empData || []).forEach((e: any) => {
+    empMap.set(e.id, { name: e.employee_name || 'Unknown', code: e.employee_code || '' });
+  });
+
+  // 2. Fetch activity_logs for the date — real live data from Electron agent
+  let query = supabase
+    .from('activity_logs')
+    .select('id, employee_id, app_name, window_title, website, start_time, end_time, duration_seconds, productive, activity_type')
+    .gte('start_time', startOfDayIST)
+    .lte('start_time', endOfDayIST)
+    .eq('activity_type', 'app')
+    .not('app_name', 'is', null)
+    .order('start_time', { ascending: false })
+    .limit(500);
+
+  if (employeeId) {
+    query = query.eq('employee_id', employeeId);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    console.error('Error fetching activity_logs:', error);
+    return [];
+  }
+
+  // 3. Map to EmployeeToolUsage, attach employee name/code, filter noise
+  const results: EmployeeToolUsage[] = [];
+  for (const row of (data || []) as any[]) {
+    const appName = row.app_name || '';
+    if (isExcludedApp(appName)) continue;
+    if ((row.duration_seconds || 0) < 2) continue; // skip blink entries
+
+    const emp = empMap.get(row.employee_id);
+    const website = row.website && row.website.trim() ? row.website.trim() : null;
+
+    // Extract clean file name from window title
+    let fileName: string | null = row.window_title || null;
+    if (fileName === 'Unknown' || fileName === appName || !fileName?.trim()) {
+      fileName = null;
+    }
+
+    results.push({
+      id: row.id,
+      employee_id: row.employee_id,
+      employee_name: emp?.name || 'Unknown',
+      employee_code: emp?.code || '',
+      tool_name: appName,
+      file_name: fileName,
+      website,
+      start_time: row.start_time,
+      end_time: row.end_time || null,
+      total_duration_seconds: row.duration_seconds || 0,
+      active_duration_seconds: row.productive ? (row.duration_seconds || 0) : 0,
+      date: dateString,
+    });
+  }
+
+  return results;
+}
+

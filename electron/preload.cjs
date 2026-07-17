@@ -29,6 +29,7 @@ const electronAPI = {
 
   // Reminders
   showWaterReminder: () => ipcRenderer.invoke('show-water-reminder'),
+  showE0048Reminder: (msg) => ipcRenderer.invoke('show-e0048-reminder', msg),
   showIdleReminder: () => ipcRenderer.invoke('show-idle-reminder'),
   setIdleModalActive: (active) => ipcRenderer.invoke('set-idle-modal-active', active),
   closeIdlePromptWindow: () => ipcRenderer.invoke('close-idle-prompt-window'),
@@ -71,7 +72,9 @@ const electronAPI = {
   },
   initializeSessionCounters: (active, idle, productive, session) =>
     ipcRenderer.invoke('initialize-session-counters', active, idle, productive, session),
+  resetSessionCounters: () => ipcRenderer.invoke('reset-session-counters'),
   getRecentScreenshots: () => ipcRenderer.invoke('get-recent-screenshots'),
+  setCurrentEmployee: (id) => ipcRenderer.invoke('set-current-employee', id),
   startScreenshotService: () => ipcRenderer.invoke('start-screenshot-service'),
   stopScreenshotService: () => ipcRenderer.invoke('stop-screenshot-service'),
   updateMonitoringSettings: (settings) => ipcRenderer.invoke('update-monitoring-settings', settings),
